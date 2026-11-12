@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { User } from '../types';
-import { LogIn, CheckCircle2, ShieldCheck, X, Sparkles, ExternalLink } from 'lucide-react';
+import { CheckCircle2, ShieldCheck, X, Sparkles, ExternalLink } from 'lucide-react';
 import { googleSignIn } from '../lib/firebase';
+import { AvatarDisplay } from './AvatarDisplay';
 
 interface GoogleAuthModalProps {
   isOpen: boolean;
@@ -33,10 +34,11 @@ export const GoogleAuthModal: React.FC<GoogleAuthModalProps> = ({
         onGoogleSignIn(user);
         onClose();
       }
-    } catch (err: any) {
-      if (err.code === 'auth/popup-closed-by-user') {
+    } catch (err: unknown) {
+      const code = (err as { code?: string })?.code;
+      if (code === 'auth/popup-closed-by-user') {
         setOauthError("La connexion a été annulée.");
-      } else if (err.code === 'auth/popup-blocked') {
+      } else if (code === 'auth/popup-blocked') {
         setOauthError("Le navigateur a bloqué la fenêtre popup Google. Veuillez autoriser les popups dans votre navigateur.");
       } else {
         setOauthError("Une erreur s'est produite lors de la connexion.");
@@ -47,7 +49,12 @@ export const GoogleAuthModal: React.FC<GoogleAuthModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4 animate-in fade-in duration-200">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Authentification Google"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4 animate-in fade-in duration-200"
+    >
       <div className="bg-[#14171D] border border-[#242933] text-[#E2E8F0] rounded-2xl p-6 max-w-md w-full shadow-2xl relative">
         <button
           onClick={onClose}
@@ -70,11 +77,16 @@ export const GoogleAuthModal: React.FC<GoogleAuthModalProps> = ({
         {currentUser?.isGoogleAuth ? (
           <div className="space-y-6">
             <div className="bg-[#1A1D23] border border-emerald-500/30 rounded-xl p-4 flex items-center gap-4">
-              <img
-                src={currentUser.avatarUrl || `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(currentUser.name)}`}
-                alt={currentUser.name}
-                className="w-12 h-12 rounded-full border-2 border-emerald-500/50 object-cover"
-              />
+              {currentUser.avatarUrl && currentUser.avatarUrl.startsWith('http') ? (
+                <img
+                  src={currentUser.avatarUrl}
+                  alt={currentUser.name}
+                  referrerPolicy="no-referrer"
+                  className="w-12 h-12 rounded-full border-2 border-emerald-500/50 object-cover"
+                />
+              ) : (
+                <AvatarDisplay user={currentUser} size={48} />
+              )}
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-1.5 text-emerald-400 text-xs font-semibold">
                   <CheckCircle2 className="w-3.5 h-3.5" /> Compte Google Vérifié

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { HistoryItem, VoteValue } from '../types';
+import { HistoryItem, VoteValue, DeckType, ArbitrateHandler } from '../types';
 import {
   X,
   History,
@@ -17,17 +17,20 @@ import {
   CheckSquare,
   Square
 } from 'lucide-react';
+import { getActiveDeckValues } from '../lib/stats';
 
 interface HistoryPanelProps {
   isOpen: boolean;
   onClose: () => void;
   history: HistoryItem[];
   isHost: boolean;
+  deckType?: DeckType;
+  deckValues?: VoteValue[];
   onClearHistory: () => void;
   onDeleteHistoryItems?: (historyIds: string[]) => void;
   onOpenCreatedRooms?: () => void;
   onOpenStats?: () => void;
-  onArbitrate?: (historyId: string, finalScore?: VoteValue, backFinalScore?: VoteValue, frontFinalScore?: VoteValue) => void;
+  onArbitrate?: ArbitrateHandler;
 }
 
 const formatDuration = (totalSecs?: number) => {
@@ -45,13 +48,22 @@ const formatDuration = (totalSecs?: number) => {
   return `${secs}s`;
 };
 
-const FIBONACCI_CHOICES: VoteValue[] = [0.5, 1, 2, 3, 5, 8, 13, 21, '☕', '?'];
+const escapeCsvCell = (raw: unknown): string => {
+  if (raw === undefined || raw === null) return '';
+  let str = String(raw);
+  if (/^[=+\-@\t\r]/.test(str)) {
+    str = `'${str}`;
+  }
+  return `"${str.replace(/"/g, '""')}"`;
+};
 
 export const HistoryPanel: React.FC<HistoryPanelProps> = ({
   isOpen,
   onClose,
   history,
   isHost,
+  deckType = 'fibonacci',
+  deckValues,
   onClearHistory,
   onDeleteHistoryItems,
   onOpenCreatedRooms,
@@ -63,6 +75,8 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
   const [selectedHistoryIds, setSelectedHistoryIds] = useState<string[]>([]);
 
   if (!isOpen) return null;
+
+  const activeChoices = getActiveDeckValues(deckType, deckValues);
 
   const filteredHistory = history.filter(item =>
     item.storyTitle.toLowerCase().includes(searchTerm.toLowerCase())
@@ -91,33 +105,62 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
   const handleExportCSV = () => {
     if (history.length === 0) return;
 
-    let csvContent = 'data:text/csv;charset=utf-8,';
-    csvContent += 'Heure,User Story,Temps écoulé,Moyenne,Mode,Valeur retenue,Nombre de votes,Detail des votes\n';
+    const header = [
+      'Heure',
+      'User Story',
+      'Mode estimation',
+      'Temps écoulé',
+      'Moyenne',
+      'Mode',
+      'Score Back',
+      'Score Front',
+      'Valeur retenue',
+      'Nombre de votes',
+      'Détail des votes'
+    ].join(',');
 
-    history.forEach(item => {
+    const rows = history.map(item => {
       const votesStr = item.votes.map(v => {
         if (v.backValue !== undefined || v.frontValue !== undefined) {
           return `${v.userName}: BK[${v.backValue ?? '-'}] FR[${v.frontValue ?? '-'}]`;
         }
         return `${v.userName}: ${v.value ?? '-'}`;
       }).join(' | ');
-      const titleEscaped = `"${item.storyTitle.replace(/"/g, '""')}"`;
-      const durationStr = formatDuration(item.durationSeconds);
-      const finalVal = item.finalScore ?? '';
-      csvContent += `${item.timestamp},${titleEscaped},"${durationStr}",${item.average ?? ''},${item.mode ?? ''},${finalVal},${item.totalVotes},"${votesStr}"\n`;
+
+      return [
+        escapeCsvCell(item.timestamp),
+        escapeCsvCell(item.storyTitle),
+        escapeCsvCell(item.estimationMode || 'GLOBAL'),
+        escapeCsvCell(formatDuration(item.durationSeconds)),
+        escapeCsvCell(item.average ?? ''),
+        escapeCsvCell(item.mode ?? ''),
+        escapeCsvCell(item.backFinalScore ?? item.backMode ?? ''),
+        escapeCsvCell(item.frontFinalScore ?? item.frontMode ?? ''),
+        escapeCsvCell(item.finalScore ?? ''),
+        escapeCsvCell(item.totalVotes),
+        escapeCsvCell(votesStr)
+      ].join(',');
     });
 
-    const encodedUri = encodeURI(csvContent);
+    const csvText = '\uFEFF' + [header, ...rows].join('\r\n') + '\r\n';
+    const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
-    link.setAttribute('href', encodedUri);
+    link.setAttribute('href', url);
     link.setAttribute('download', `scrum-poker-history-${Date.now()}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Historique des votes"
+      className="fixed inset-0 z-50 flex justify-end bg-black/60 backdrop-blur-sm animate-in fade-in duration-200"
+    >
       <div className="bg-[#14171D] border-l border-[#242933] text-[#E2E8F0] w-full max-w-lg h-full p-6 shadow-2xl flex flex-col justify-between overflow-hidden">
         {/* Header */}
         <div>
@@ -334,11 +377,11 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
                               <span className="text-slate-400 font-normal">({item.backFinalScore ?? 'Non défini'})</span>
                             </p>
                             <div className="flex flex-wrap gap-1">
-                              {FIBONACCI_CHOICES.map(val => (
+                              {activeChoices.map(val => (
                                 <button
                                   key={`hist-back-${String(val)}`}
                                   onClick={() => {
-                                    onArbitrate(item.id, undefined, val, item.frontFinalScore);
+                                    onArbitrate(item.id, undefined, val, item.frontFinalScore ?? undefined);
                                   }}
                                   className={`px-2 py-0.5 rounded text-[10px] font-extrabold transition-all cursor-pointer ${
                                     item.backFinalScore === val
@@ -358,11 +401,11 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
                               <span className="text-slate-400 font-normal">({item.frontFinalScore ?? 'Non défini'})</span>
                             </p>
                             <div className="flex flex-wrap gap-1">
-                              {FIBONACCI_CHOICES.map(val => (
+                              {activeChoices.map(val => (
                                 <button
                                   key={`hist-front-${String(val)}`}
                                   onClick={() => {
-                                    onArbitrate(item.id, undefined, item.backFinalScore, val);
+                                    onArbitrate(item.id, undefined, item.backFinalScore ?? undefined, val);
                                   }}
                                   className={`px-2 py-0.5 rounded text-[10px] font-extrabold transition-all cursor-pointer ${
                                     item.frontFinalScore === val
@@ -380,7 +423,7 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
                         <div>
                           <p className="text-[10px] font-bold text-slate-400 mb-1.5">Modifier la valeur finale retenue :</p>
                           <div className="flex flex-wrap gap-1">
-                            {FIBONACCI_CHOICES.map(val => (
+                            {activeChoices.map(val => (
                               <button
                                 key={String(val)}
                                 onClick={() => {

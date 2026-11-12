@@ -41,6 +41,9 @@ export const AvatarCustomizerModal: React.FC<AvatarCustomizerModalProps> = ({
 
   return (
     <div 
+      role="dialog"
+      aria-modal="true"
+      aria-label="Personnaliser Profil"
       className="fixed inset-0 z-[60] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in duration-200"
       onClick={onClose}
     >

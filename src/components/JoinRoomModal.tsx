@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { User } from '../types';
 import { UserCheck, Sparkles, ArrowRight, ShieldCheck, Eye, Dices } from 'lucide-react';
 import { generateRandomAvatar } from '../constants/avatars';
+import { AvatarDisplay } from './AvatarDisplay';
 
 interface JoinRoomModalProps {
   isOpen: boolean;
@@ -32,9 +33,10 @@ export const JoinRoomModal: React.FC<JoinRoomModalProps> = ({
     e.preventDefault();
     const name = pseudonym.trim() || selectedAvatar.name;
     const user: User = {
-      id: `usr-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+      id: `usr-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       name,
-      avatarUrl: selectedAvatar.avatarUrl,
+      avatarSeed: selectedAvatar.avatarSeed,
+      avatarUrl: selectedAvatar.avatarSeed,
       isGoogleAuth: false,
       isSpectator
     };
@@ -42,7 +44,12 @@ export const JoinRoomModal: React.FC<JoinRoomModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-4 animate-in fade-in duration-200 overflow-y-auto">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Rejoindre la Session"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-4 animate-in fade-in duration-200 overflow-y-auto"
+    >
       <div className="bg-[#14171D] border border-[#242933] text-[#E2E8F0] rounded-3xl p-6 sm:p-8 max-w-md w-full shadow-2xl relative my-8 overflow-hidden">
         {/* Subtle glow backdrop */}
         <div className="absolute -top-24 -right-24 w-56 h-56 bg-fuchsia-600/10 rounded-full blur-3xl pointer-events-none" />
@@ -65,11 +72,12 @@ export const JoinRoomModal: React.FC<JoinRoomModalProps> = ({
             {/* Avatar */}
             <div className="shrink-0 flex flex-col items-center gap-2">
               <div className="w-16 h-16 rounded-2xl overflow-hidden shrink-0 shadow-lg shadow-fuchsia-950/40 relative">
-                <img
-                  src={selectedAvatar.avatarUrl}
-                  alt={selectedAvatar.name}
-                  referrerPolicy="no-referrer"
-                  className="w-full h-full object-cover"
+                <AvatarDisplay
+                  user={{
+                    name: pseudonym.trim() || selectedAvatar.name,
+                    avatarSeed: selectedAvatar.avatarSeed
+                  }}
+                  size={64}
                 />
               </div>
               <button

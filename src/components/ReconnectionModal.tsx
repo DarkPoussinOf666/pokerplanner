@@ -14,8 +14,12 @@ export const ReconnectionModal: React.FC<ReconnectionModalProps> = ({ isOpen }) 
   const handleRefresh = async () => {
     setIsRefreshing(true);
     try {
-      // 1. Clear session storage
+      // 1. Clear session storage while preserving any pending local vote cache
+      const pendingVote = sessionStorage.getItem('scrum_poker_current_vote_cache');
       sessionStorage.clear();
+      if (pendingVote) {
+        sessionStorage.setItem('scrum_poker_current_vote_cache', pendingVote);
+      }
 
       // 2. Clear browser caches if available
       if ('caches' in window) {
@@ -38,6 +42,9 @@ export const ReconnectionModal: React.FC<ReconnectionModalProps> = ({ isOpen }) 
 
   return (
     <div 
+      role="alertdialog"
+      aria-modal="true"
+      aria-label="Connexion Interrompue"
       className="fixed inset-0 bg-black/90 backdrop-blur-lg z-[99999] flex items-center justify-center p-4 animate-in fade-in duration-200 cursor-pointer"
       onClick={handleRefresh}
     >

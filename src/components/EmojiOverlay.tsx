@@ -22,97 +22,68 @@ interface PhysicsEmoji {
 export const EmojiOverlay: React.FC<EmojiOverlayProps> = ({ emojis }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const physicsEmojisRef = useRef<Map<string, PhysicsEmoji>>(new Map());
-  const rAFRef = useRef<number>();
+  const cardBoundsRef = useRef<Array<{ id: string; rect: DOMRect }>>([]);
+  const rAFRef = useRef<number | null>(null);
   const lastTimeRef = useRef<number>(performance.now());
   const [renderedEmojis, setRenderedEmojis] = useState<EmojiEventPayload[]>([]);
 
-  // Sync emojis prop with rendered list and physics state
+  const refreshCardBounds = () => {
+    const cards = document.querySelectorAll('.participant-card');
+    cardBoundsRef.current = Array.from(cards).map(card => ({
+      id: card.id,
+      rect: card.getBoundingClientRect()
+    }));
+  };
+
   useEffect(() => {
-    const currentPhysics = physicsEmojisRef.current;
-    
-    emojis.forEach(e => {
-      if (!currentPhysics.has(e.id)) {
-        // e.x and e.y are click point percentages (0 to 100)
-        const targetX = (e.x / 100) * window.innerWidth;
-        const targetY = (e.y / 100) * window.innerHeight;
-
-        // Determine closest lateral edge (left or right side)
-        const isLeftClosest = targetX < window.innerWidth / 2;
-        const startX = isLeftClosest ? -60 : window.innerWidth + 60;
-        
-        // Start Y is close to the target Y with small random offset
-        const startY = Math.min(Math.max(targetY + (Math.random() * 80 - 40), 60), window.innerHeight - 60);
-
-        // Calculate velocity trajectory to hit target
-        const dx = targetX - startX;
-        const dy = targetY - startY;
-        const distance = Math.sqrt(dx * dx + dy * dy);
-        
-        const speed = 1200 + Math.random() * 300; // Base speed px/s
-        const t = Math.max(distance / speed, 0.25); // Estimated time to target in seconds
-        
-        const GRAVITY = 1500; // Must match physics loop GRAVITY
-        const vx = dx / t;
-        const vy = (dy - 0.5 * GRAVITY * t * t) / t;
-
-        currentPhysics.set(e.id, {
-          id: e.id,
-          emoji: e.emoji,
-          senderName: e.senderName,
-          x: startX,
-          y: startY,
-          vx: vx,
-          vy: vy,
-          hasHit: new Set(),
-          life: 4000 // 4 seconds max life
-        });
+    const onResize = () => {
+      if (physicsEmojisRef.current.size > 0) {
+        refreshCardBounds();
       }
-    });
+    };
+    window.addEventListener('resize', onResize);
+    return () => {
+      window.removeEventListener('resize', onResize);
+      if (rAFRef.current !== null) {
+        cancelAnimationFrame(rAFRef.current);
+        rAFRef.current = null;
+      }
+    };
+  }, []);
 
-    setRenderedEmojis(Array.from(currentPhysics.values()).map((pe: PhysicsEmoji) => ({
-      id: pe.id,
-      emoji: pe.emoji,
-      senderName: pe.senderName,
-      x: 0,
-      y: 0
-    })));
-  }, [emojis]);
+  const startLoopIfNeeded = () => {
+    if (rAFRef.current !== null || physicsEmojisRef.current.size === 0) {
+      return;
+    }
 
-  // Physics loop
-  useEffect(() => {
+    lastTimeRef.current = performance.now();
+
     const loop = (time: number) => {
-      const dt = Math.min((time - lastTimeRef.current) / 1000, 0.05); // cap dt
-      lastTimeRef.current = time;
-      
       const currentPhysics = physicsEmojisRef.current;
-      const GRAVITY = 1500;
-      
-      // Get all card bounds
-      const cards = document.querySelectorAll('.participant-card');
-      const cardBounds = Array.from(cards).map(card => {
-        return {
-          id: card.id,
-          rect: card.getBoundingClientRect()
-        };
-      });
+      if (currentPhysics.size === 0) {
+        rAFRef.current = null;
+        return;
+      }
 
+      const dt = Math.min((time - lastTimeRef.current) / 1000, 0.05);
+      lastTimeRef.current = time;
+
+      const GRAVITY = 1500;
+      const cardBounds = cardBoundsRef.current;
       let stateChanged = false;
 
       currentPhysics.forEach((pe, id) => {
         pe.life -= dt * 1000;
-        
-        // Physics integration
+
         pe.vy += GRAVITY * dt;
         pe.x += pe.vx * dt;
         pe.y += pe.vy * dt;
 
-        // Collision with participant cards
         let hitSomething = false;
-        const EMOJI_SIZE = 40; // rough box size
-        
+        const EMOJI_SIZE = 40;
+
         for (const card of cardBounds) {
           if (!pe.hasHit.has(card.id)) {
-            // AABB Collision check
             if (
               pe.x < card.rect.right &&
               pe.x + EMOJI_SIZE > card.rect.left &&
@@ -121,10 +92,9 @@ export const EmojiOverlay: React.FC<EmojiOverlayProps> = ({ emojis }) => {
             ) {
               pe.hasHit.add(card.id);
               hitSomething = true;
-              
-              // Bounce effect on impact!
-              pe.vy = -Math.abs(pe.vy) * 0.5 - 200; // Bounce up
-              pe.vx *= -0.5; // Reverse horizontal momentum slightly
+
+              pe.vy = -Math.abs(pe.vy) * 0.5 - 200;
+              pe.vx *= -0.5;
             }
           }
         }
@@ -133,16 +103,13 @@ export const EmojiOverlay: React.FC<EmojiOverlayProps> = ({ emojis }) => {
           playPopSound();
         }
 
-        // Update DOM element
         if (pe.element) {
           pe.element.style.transform = `translate(${pe.x}px, ${pe.y}px)`;
-          // Fade out at end of life
           if (pe.life < 500) {
-            pe.element.style.opacity = (pe.life / 500).toString();
+            pe.element.style.opacity = Math.max(0, pe.life / 500).toString();
           }
         }
 
-        // Remove dead emojis or ones that fell far below screen
         if (pe.life <= 0 || pe.y > window.innerHeight + 200) {
           currentPhysics.delete(id);
           stateChanged = true;
@@ -159,15 +126,69 @@ export const EmojiOverlay: React.FC<EmojiOverlayProps> = ({ emojis }) => {
         })));
       }
 
-      rAFRef.current = requestAnimationFrame(loop);
+      if (currentPhysics.size > 0) {
+        rAFRef.current = requestAnimationFrame(loop);
+      } else {
+        rAFRef.current = null;
+      }
     };
 
     rAFRef.current = requestAnimationFrame(loop);
+  };
 
-    return () => {
-      if (rAFRef.current) cancelAnimationFrame(rAFRef.current);
-    };
-  }, []);
+  // Sync emojis prop with rendered list and physics state
+  useEffect(() => {
+    const currentPhysics = physicsEmojisRef.current;
+    let addedNew = false;
+
+    emojis.forEach(e => {
+      if (!currentPhysics.has(e.id)) {
+        addedNew = true;
+        const targetX = (e.x / 100) * window.innerWidth;
+        const targetY = (e.y / 100) * window.innerHeight;
+
+        const isLeftClosest = targetX < window.innerWidth / 2;
+        const startX = isLeftClosest ? -60 : window.innerWidth + 60;
+
+        const startY = Math.min(Math.max(targetY + (Math.random() * 80 - 40), 60), window.innerHeight - 60);
+
+        const dx = targetX - startX;
+        const dy = targetY - startY;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+
+        const speed = 1200 + Math.random() * 300;
+        const t = Math.max(distance / speed, 0.25);
+
+        const GRAVITY = 1500;
+        const vx = dx / t;
+        const vy = (dy - 0.5 * GRAVITY * t * t) / t;
+
+        currentPhysics.set(e.id, {
+          id: e.id,
+          emoji: e.emoji,
+          senderName: e.senderName,
+          x: startX,
+          y: startY,
+          vx: vx,
+          vy: vy,
+          hasHit: new Set(),
+          life: 4000
+        });
+      }
+    });
+
+    if (addedNew) {
+      refreshCardBounds();
+      setRenderedEmojis(Array.from(currentPhysics.values()).map((pe: PhysicsEmoji) => ({
+        id: pe.id,
+        emoji: pe.emoji,
+        senderName: pe.senderName,
+        x: 0,
+        y: 0
+      })));
+      startLoopIfNeeded();
+    }
+  }, [emojis]);
 
   return (
     <div ref={containerRef} className="fixed inset-0 pointer-events-none z-[100] overflow-hidden">

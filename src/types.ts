@@ -100,17 +100,15 @@ export interface RoomState {
   hostId: string;
   hostName: string;
   hostToken?: string;
+  hostTokenHash?: string;
   hostGoogleUid?: string;
   deckType: DeckType;
   deckValues?: VoteValue[];
   currentStory: string;
   storyStartTime?: number;
-  timerDuration?: number | null;
-  timerRemaining?: number | null;
   isSessionStarted?: boolean;
   isRevealed: boolean;
   estimationMode?: 'GLOBAL' | 'DUAL';
-  revealCountdown?: number | null;
   participants: Record<string, ParticipantVote>;
   history: HistoryItem[];
   backlog?: BacklogItem[];
@@ -128,7 +126,15 @@ export interface EmojiEventPayload {
   senderName: string;
   x: number; // percentage 0-100
   y: number; // percentage 0-100
+  emojiStats?: RoomEmojiStats;
 }
+
+export type ArbitrateHandler = (
+  historyId: string,
+  finalScore?: VoteValue,
+  backFinalScore?: VoteValue,
+  frontFinalScore?: VoteValue
+) => void;
 
 export interface CreatedRoomSummary {
   roomId: string;

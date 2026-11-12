@@ -1,20 +1,17 @@
 import React, { useState, useEffect } from 'react';
-import { User, CreatedRoomSummary, HistoryItem } from '../types';
+import { User, CreatedRoomSummary } from '../types';
+import { getValidIdToken } from '../lib/firebase';
 import {
   X,
   FolderClock,
   LogIn,
   ArrowRight,
   Clock,
-  Calculator,
   Search,
-  CheckCircle2,
-  Users,
   ChevronDown,
   ChevronUp,
   Sparkles,
   PlusCircle,
-  ExternalLink,
   Trash2,
   CheckSquare,
   Square
@@ -79,20 +76,7 @@ export const CreatedRoomsModal: React.FC<CreatedRoomsModalProps> = ({
       try {
         const roomMap: Record<string, CreatedRoomSummary> = {};
 
-        // 1. Read from guest local storage
-        try {
-          const rawGuest = localStorage.getItem('scrum_poker_created_rooms_guest');
-          if (rawGuest) {
-            const guestRooms: CreatedRoomSummary[] = JSON.parse(rawGuest);
-            guestRooms.forEach(room => {
-              if (room.roomId) roomMap[room.roomId] = room;
-            });
-          }
-        } catch (e) {
-          console.error('Error parsing guest created rooms', e);
-        }
-
-        // 2. Read from user-specific local storage
+        // 1. Read from user-specific local storage (or guest storage if not logged in)
         if (currentUser?.id) {
           try {
             const rawLocal = localStorage.getItem(`scrum_poker_created_rooms_${currentUser.id}`);
@@ -105,29 +89,47 @@ export const CreatedRoomsModal: React.FC<CreatedRoomsModalProps> = ({
           } catch (e) {
             console.error('Error parsing user local created rooms', e);
           }
+        } else {
+          try {
+            const rawGuest = localStorage.getItem('scrum_poker_created_rooms_guest');
+            if (rawGuest) {
+              const guestRooms: CreatedRoomSummary[] = JSON.parse(rawGuest);
+              guestRooms.forEach(room => {
+                if (room.roomId) roomMap[room.roomId] = room;
+              });
+            }
+          } catch (e) {
+            console.error('Error parsing guest created rooms', e);
+          }
         }
 
-        // 3. Fetch from API if user has ID
-        if (currentUser?.id) {
+        // 2. Fetch from API if user is authenticated with Google
+        if (currentUser?.id && currentUser.isGoogleAuth) {
           try {
-            const res = await fetch(`/api/users/${currentUser.id}/created-rooms`);
-            if (res.ok) {
-              const data = await res.json();
-              const apiRooms: CreatedRoomSummary[] = data.createdRooms || [];
-              apiRooms.forEach(room => {
-                if (!room.roomId) return;
-                // Preserve local history if richer
-                if (roomMap[room.roomId]) {
-                  const localHist = roomMap[room.roomId].history || [];
-                  const apiHist = room.history || [];
-                  const histMap = new Map();
-                  [...localHist, ...apiHist].forEach(h => {
-                    if (h.id) histMap.set(h.id, h);
-                  });
-                  room.history = Array.from(histMap.values());
+            const token = await getValidIdToken();
+            if (token) {
+              const res = await fetch(`/api/users/${encodeURIComponent(currentUser.id)}/created-rooms`, {
+                headers: {
+                  Authorization: `Bearer ${token}`
                 }
-                roomMap[room.roomId] = room;
               });
+              if (res.ok) {
+                const data = await res.json();
+                const apiRooms: CreatedRoomSummary[] = data.createdRooms || [];
+                apiRooms.forEach(room => {
+                  if (!room.roomId) return;
+                  if (roomMap[room.roomId]) {
+                    const localHist = roomMap[room.roomId].history || [];
+                    const apiHist = room.history || [];
+                    const histMap = new Map();
+                    [...localHist, ...apiHist].forEach(h => {
+                      if (h.id) histMap.set(h.id, h);
+                    });
+                    room.history = Array.from(histMap.values());
+                  }
+                  roomMap[room.roomId] = room;
+                });
+              }
             }
           } catch (e) {
             console.error('Error fetching created rooms from server', e);
@@ -149,8 +151,9 @@ export const CreatedRoomsModal: React.FC<CreatedRoomsModalProps> = ({
 
         if (currentUser?.id) {
           localStorage.setItem(`scrum_poker_created_rooms_${currentUser.id}`, JSON.stringify(top10));
+        } else {
+          localStorage.setItem('scrum_poker_created_rooms_guest', JSON.stringify(top10));
         }
-        localStorage.setItem('scrum_poker_created_rooms_guest', JSON.stringify(top10));
       } catch (err) {
         console.error('Failed to load created rooms', err);
       } finally {
@@ -192,13 +195,19 @@ export const CreatedRoomsModal: React.FC<CreatedRoomsModalProps> = ({
   const handleDeleteRooms = async (roomIdsToDelete: string[]) => {
     if (roomIdsToDelete.length === 0) return;
 
-    if (currentUser?.id) {
+    if (currentUser?.id && currentUser.isGoogleAuth) {
       try {
-        await fetch(`/api/users/${currentUser.id}/created-rooms`, {
-          method: 'DELETE',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ roomIds: roomIdsToDelete })
-        });
+        const token = await getValidIdToken();
+        if (token) {
+          await fetch(`/api/users/${encodeURIComponent(currentUser.id)}/created-rooms`, {
+            method: 'DELETE',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`
+            },
+            body: JSON.stringify({ roomIds: roomIdsToDelete })
+          });
+        }
       } catch (e) {
         console.error('Failed to delete rooms on server', e);
       }
@@ -210,12 +219,18 @@ export const CreatedRoomsModal: React.FC<CreatedRoomsModalProps> = ({
 
     if (currentUser?.id) {
       localStorage.setItem(`scrum_poker_created_rooms_${currentUser.id}`, JSON.stringify(updated));
+    } else {
+      localStorage.setItem('scrum_poker_created_rooms_guest', JSON.stringify(updated));
     }
-    localStorage.setItem('scrum_poker_created_rooms_guest', JSON.stringify(updated));
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md animate-in fade-in duration-200">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Mes Salles Créées"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md animate-in fade-in duration-200"
+    >
       <div className="bg-[#14171D] border border-[#242933] text-[#E2E8F0] w-full max-w-2xl max-h-[85vh] rounded-2xl p-6 shadow-2xl flex flex-col justify-between overflow-hidden relative">
         {/* Header */}
         <div className="shrink-0 pb-4 border-b border-[#242933]">

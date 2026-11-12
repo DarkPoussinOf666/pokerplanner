@@ -1,6 +1,9 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
+import { onAuthStateChanged } from 'firebase/auth';
 import { User, RoomState, VoteValue, EmojiEventPayload, ParticipantVote, CreatedRoomSummary, BacklogItem, DeckType } from './types';
 import { getSocket } from './lib/socket';
+import { auth, getValidIdToken, googleSignOut } from './lib/firebase';
+import { calculateValueStats, getActiveDeckValues } from './lib/stats';
 import { Navbar } from './components/Navbar';
 import { PokerTable } from './components/PokerTable';
 import { VotingDeck } from './components/VotingDeck';
@@ -48,6 +51,9 @@ export default function App() {
   const [isConnected, setIsConnected] = useState<boolean>(true);
   const [hasConnectedOnce, setHasConnectedOnce] = useState<boolean>(false);
 
+  const wasRevealedRef = useRef<{ roomId: string; revealed: boolean }>({ roomId: '', revealed: false });
+  const joinedRoomRef = useRef<string>('');
+
   // Extract room ID from URL parameters or search
   const [roomId, setRoomId] = useState<string>(() => {
     const params = new URLSearchParams(window.location.search);
@@ -71,26 +77,82 @@ export default function App() {
   });
 
   // Save current user to localStorage
-  const saveUser = (user: User) => {
+  const saveUser = useCallback((user: User) => {
     setCurrentUser(user);
     localStorage.setItem('scrum_poker_user', JSON.stringify(user));
-  };
+  }, []);
+
+  // Keep Firebase Google session synced with localStorage user
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (fbUser) => {
+      if (!fbUser) {
+        setCurrentUser((prev) => {
+          if (prev?.isGoogleAuth) {
+            const demoted: User = {
+              ...prev,
+              id: prev.id.startsWith('google-') ? `usr-${Date.now()}` : prev.id,
+              isGoogleAuth: false
+            };
+            localStorage.setItem('scrum_poker_user', JSON.stringify(demoted));
+            return demoted;
+          }
+          return prev;
+        });
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Join Room via Socket (attaches verified Google ID token when authenticated)
+  const joinRoom = useCallback(async (
+    targetRoomId: string,
+    userToJoin: User,
+    options?: { isCreate?: boolean; isReconnect?: boolean }
+  ) => {
+    const socket = getSocket();
+    joinedRoomRef.current = `${targetRoomId}:${userToJoin.id}`;
+    setRoomId(targetRoomId);
+
+    const savedHostToken = localStorage.getItem(`scrum_poker_host_token_${targetRoomId}`) || userToJoin.hostToken;
+    const idToken = userToJoin.isGoogleAuth ? (await getValidIdToken()) || undefined : undefined;
+
+    // Update URL without reload
+    const newUrl = `${window.location.pathname}?room=${targetRoomId}`;
+    window.history.pushState({ path: newUrl }, '', newUrl);
+
+    socket.emit('room:join', {
+      roomId: targetRoomId,
+      user: userToJoin,
+      hostToken: savedHostToken || undefined,
+      idToken,
+      isCreate: options?.isCreate,
+      isReconnect: options?.isReconnect
+    });
+  }, []);
 
   // Socket Connection & Event Handling
   useEffect(() => {
     const socket = getSocket();
 
     const handleRoomState = (state: RoomState) => {
+      const justRevealed =
+        wasRevealedRef.current.roomId === state.id &&
+        !wasRevealedRef.current.revealed &&
+        state.isRevealed;
+      wasRevealedRef.current = { roomId: state.id, revealed: state.isRevealed };
+
       setRoomState(state);
 
       // Auto-sync room history to user's created rooms cache if user is host/creator
       const userStr = localStorage.getItem('scrum_poker_user');
-      const currentUserLocal = userStr ? JSON.parse(userStr) : null;
+      const currentUserLocal: User | null = userStr ? JSON.parse(userStr) : null;
       const hostTokenInStorage = state?.id ? localStorage.getItem(`scrum_poker_host_token_${state.id}`) : null;
-      const isHostUser = currentUserLocal && state && (
-        state.hostId === currentUserLocal.id ||
-        state.hostGoogleUid === currentUserLocal.id ||
-        (hostTokenInStorage && hostTokenInStorage === state.hostToken)
+      const isHostUser = Boolean(
+        currentUserLocal &&
+        state &&
+        (state.hostId === currentUserLocal.id ||
+          state.participants?.[currentUserLocal.id]?.isHost ||
+          Boolean(hostTokenInStorage))
       );
 
       if (isHostUser && currentUserLocal) {
@@ -115,7 +177,9 @@ export default function App() {
             existingRooms = [updatedSummary, ...existingRooms].slice(0, 10);
           }
           localStorage.setItem(key, JSON.stringify(existingRooms));
-          localStorage.setItem('scrum_poker_created_rooms_guest', JSON.stringify(existingRooms));
+          if (!currentUserLocal.isGoogleAuth) {
+            localStorage.setItem('scrum_poker_created_rooms_guest', JSON.stringify(existingRooms));
+          }
         } catch (e) {
           console.error('Failed syncing created rooms to local cache', e);
         }
@@ -125,7 +189,7 @@ export default function App() {
       if (state && !state.isRevealed) {
         try {
           const userObjStr = localStorage.getItem('scrum_poker_user');
-          const myUser = userObjStr ? JSON.parse(userObjStr) : null;
+          const myUser: User | null = userObjStr ? JSON.parse(userObjStr) : null;
           const cacheRaw = sessionStorage.getItem('scrum_poker_current_vote_cache');
           if (myUser && cacheRaw) {
             const cache = JSON.parse(cacheRaw);
@@ -155,24 +219,35 @@ export default function App() {
         }
       }
 
-      // Check if votes were just revealed and trigger confetti if perfect consensus
-      if (state.isRevealed) {
-        const votes = Object.values(state.participants)
-          .filter(p => p.hasVoted && typeof p.value === 'number')
-          .map(p => p.value);
+      // Trigger confetti ONLY on reveal transition when voters achieved unanimity (Global or Dual)
+      if (justRevealed) {
+        const activeVoters = (Object.values(state.participants) as ParticipantVote[]).filter(
+          p => p.hasVoted && !p.isSpectator
+        );
+        if (activeVoters.length > 1) {
+          const isUnanimous =
+            state.estimationMode === 'DUAL'
+              ? calculateValueStats(activeVoters, p => p.backValue).isUnanimous &&
+                calculateValueStats(activeVoters, p => p.frontValue).isUnanimous
+              : calculateValueStats(activeVoters, p => p.value).isUnanimous;
 
-        if (votes.length > 1 && votes.every(v => v === votes[0])) {
-          confetti({
-            particleCount: 80,
-            spread: 70,
-            origin: { y: 0.6 }
-          });
+          if (isUnanimous) {
+            confetti({
+              particleCount: 80,
+              spread: 70,
+              origin: { y: 0.6 }
+            });
+          }
         }
       }
     };
 
     const handleEmojiReceived = (payload: EmojiEventPayload) => {
       setActiveEmojis(prev => [...prev, payload]);
+      if (payload.emojiStats) {
+        const nextEmojiStats = payload.emojiStats;
+        setRoomState(prev => (prev ? { ...prev, emojiStats: nextEmojiStats } : prev));
+      }
       setTimeout(() => {
         setActiveEmojis(prev => prev.filter(e => e.id !== payload.id));
       }, 2500);
@@ -183,7 +258,6 @@ export default function App() {
       const currentUserLocal = userStr ? JSON.parse(userStr) : null;
       if (currentUserLocal && currentUserLocal.id === targetUserId) {
         setToastMessage("Le vote vous attend ! ⏳");
-        // Vibrate if supported
         if (navigator.vibrate) {
           navigator.vibrate([200, 100, 200]);
         }
@@ -195,6 +269,7 @@ export default function App() {
       const userStr = localStorage.getItem('scrum_poker_user');
       const currentUserLocal = userStr ? JSON.parse(userStr) : null;
       if (currentUserLocal && currentUserLocal.id === targetUserId) {
+        joinedRoomRef.current = '';
         setToastMessage("Vous avez été exclu de cette salle par l'hôte.");
         setRoomState(null);
         setRoomId('');
@@ -210,15 +285,20 @@ export default function App() {
       }
     };
 
-    const handleRoomNotFound = ({ roomId: notFoundId }: { roomId: string }) => {
-      setToastMessage("La salle a été supprimée ou n'existe plus.");
-      setTimeout(() => {
-        window.location.href = '/';
-      }, 2000);
+    const handleRoomNotFound = () => {
+      joinedRoomRef.current = '';
+      setRoomState(null);
+      setRoomId('');
+      setIsJoinModalOpen(false);
+      const newUrl = window.location.pathname;
+      window.history.pushState({ path: newUrl }, '', newUrl);
+      setToastMessage("Cette salle n'existe pas ou a été supprimée.");
+      setTimeout(() => setToastMessage(null), 4000);
     };
 
     const handleErrorToast = ({ message }: { message: string }) => {
       setToastMessage(message);
+      setTimeout(() => setToastMessage(null), 4000);
     };
 
     socket.on('room:state', handleRoomState);
@@ -240,24 +320,6 @@ export default function App() {
     };
   }, []);
 
-  // Join Room via Socket
-  const joinRoom = useCallback((targetRoomId: string, userToJoin: User) => {
-    const socket = getSocket();
-    setRoomId(targetRoomId);
-
-    const savedHostToken = localStorage.getItem(`scrum_poker_host_token_${targetRoomId}`) || userToJoin.hostToken;
-
-    // Update URL without reload
-    const newUrl = `${window.location.pathname}?room=${targetRoomId}`;
-    window.history.pushState({ path: newUrl }, '', newUrl);
-
-    socket.emit('room:join', {
-      roomId: targetRoomId,
-      user: userToJoin,
-      hostToken: savedHostToken || undefined
-    });
-  }, []);
-
   // Handle socket reconnection, offline events, and session heartbeat
   useEffect(() => {
     const socket = getSocket();
@@ -266,11 +328,9 @@ export default function App() {
       setIsConnected(true);
       setHasConnectedOnce(true);
     } else {
-      // Check active state
       setIsConnected(false);
     }
 
-    // Fallback timer to mark initialization completed
     const initialTimer = setTimeout(() => {
       setHasConnectedOnce(true);
       if (!socket.connected || !navigator.onLine) {
@@ -279,38 +339,28 @@ export default function App() {
     }, 1000);
 
     const handleConnect = () => {
-      console.log('Socket connected successfully');
       setIsConnected(true);
       setHasConnectedOnce(true);
-      // Re-join the room if we are already "in" one
       if (roomId && currentUser) {
-        console.log('Socket reconnected, re-joining room', roomId);
-        const savedHostToken = localStorage.getItem(`scrum_poker_host_token_${roomId}`) || currentUser.hostToken;
-        socket.emit('room:join', {
-          roomId: roomId,
-          user: currentUser,
-          hostToken: savedHostToken || undefined,
-          isReconnect: true
-        });
-
-        // Re-submit local vote on reconnection if vote was submitted prior to drop
-        try {
-          const cacheRaw = sessionStorage.getItem('scrum_poker_current_vote_cache');
-          if (cacheRaw) {
-            const cache = JSON.parse(cacheRaw);
-            if (cache.roomId === roomId && (cache.value !== undefined || cache.backValue !== undefined || cache.frontValue !== undefined)) {
-              socket.emit('vote:submit', {
-                roomId: roomId,
-                userId: currentUser.id,
-                value: cache.value,
-                backValue: cache.backValue,
-                frontValue: cache.frontValue
-              });
+        void joinRoom(roomId, currentUser, { isReconnect: true }).then(() => {
+          try {
+            const cacheRaw = sessionStorage.getItem('scrum_poker_current_vote_cache');
+            if (cacheRaw) {
+              const cache = JSON.parse(cacheRaw);
+              if (cache.roomId === roomId && (cache.value !== undefined || cache.backValue !== undefined || cache.frontValue !== undefined)) {
+                socket.emit('vote:submit', {
+                  roomId: roomId,
+                  userId: currentUser.id,
+                  value: cache.value,
+                  backValue: cache.backValue,
+                  frontValue: cache.frontValue
+                });
+              }
             }
+          } catch {
+            // ignore
           }
-        } catch {
-          // ignore
-        }
+        });
       }
     };
 
@@ -355,7 +405,7 @@ export default function App() {
     window.addEventListener('offline', handleOffline);
     window.addEventListener('online', handleOnline);
     
-    // Heartbeat to ensure server still has our session state & connection is responsive
+    // Heartbeat every 25s to verify server still holds our room session
     const heartbeatInterval = setInterval(() => {
       if (!navigator.onLine || !socket.connected) {
         setHasConnectedOnce(true);
@@ -367,28 +417,26 @@ export default function App() {
         let responded = false;
         const checkTimeout = setTimeout(() => {
           if (!responded) {
-            console.warn('Session check timeout (no server response within 3s)');
+            console.warn('Session check timeout (no server response within 4s)');
             setHasConnectedOnce(true);
             setIsConnected(false);
           }
-        }, 3000);
+        }, 4000);
 
         socket.emit('session:check', { roomId, userId: currentUser.id }, (res: { status: string }) => {
           responded = true;
           clearTimeout(checkTimeout);
-          if (res && res.status !== 'ok') {
-            console.warn('Session check failed, forcing re-join:', res.status);
-            const savedHostToken = localStorage.getItem(`scrum_poker_host_token_${roomId}`) || currentUser.hostToken;
-            socket.emit('room:join', {
-              roomId: roomId,
-              user: currentUser,
-              hostToken: savedHostToken || undefined,
-              isReconnect: true
-            });
+          if (res && res.status === 'not_found') {
+            joinedRoomRef.current = '';
+            setRoomState(null);
+            setRoomId('');
+            window.history.pushState({ path: window.location.pathname }, '', window.location.pathname);
+          } else if (res && res.status !== 'ok') {
+            void joinRoom(roomId, currentUser, { isReconnect: true });
           }
         });
       }
-    }, 5000);
+    }, 25000);
 
     return () => {
       clearTimeout(initialTimer);
@@ -402,12 +450,15 @@ export default function App() {
       window.removeEventListener('online', handleOnline);
       clearInterval(heartbeatInterval);
     };
-  }, [roomId, currentUser]);
+  }, [roomId, currentUser, joinRoom]);
 
-  // Check room status on load or URL change
+  // Check room status on initial URL load
   useEffect(() => {
     if (roomId && currentUser) {
-      joinRoom(roomId, currentUser);
+      const targetKey = `${roomId}:${currentUser.id}`;
+      if (joinedRoomRef.current !== targetKey) {
+        void joinRoom(roomId, currentUser);
+      }
       setIsJoinModalOpen(false);
     } else if (roomId && !currentUser) {
       setIsJoinModalOpen(true);
@@ -420,7 +471,7 @@ export default function App() {
     return localStorage.getItem(`scrum_poker_host_token_${rId}`) || currentUser?.hostToken || undefined;
   }, [roomId, currentUser]);
 
-  // Create a new Room (Requires Google Auth)
+  // Create a new Room (Strictly requires Google Auth)
   const handleCreateNewRoom = () => {
     if (!currentUser?.isGoogleAuth) {
       setIsGoogleAuthOpen(true);
@@ -428,13 +479,10 @@ export default function App() {
     }
 
     const newRoomCode = `scrum-${Math.random().toString(36).substring(2, 7)}`;
-    const newHostToken = `htoken-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-    localStorage.setItem(`scrum_poker_host_token_${newRoomCode}`, newHostToken);
 
     const creatorUser: User = {
       ...currentUser,
-      isHost: true,
-      hostToken: newHostToken
+      isHost: true
     };
 
     saveUser(creatorUser);
@@ -459,7 +507,7 @@ export default function App() {
       console.error('Failed caching created room', e);
     }
 
-    joinRoom(newRoomCode, creatorUser);
+    void joinRoom(newRoomCode, creatorUser, { isCreate: true });
   };
 
   // Join Room via entered Code
@@ -472,7 +520,9 @@ export default function App() {
         const urlParams = new URLSearchParams(raw.split('?')[1] || '');
         const extracted = urlParams.get('room');
         if (extracted) raw = extracted;
-      } catch (e) {}
+      } catch {
+        // ignore
+      }
     }
 
     let cleanCode = raw.toLowerCase();
@@ -482,26 +532,27 @@ export default function App() {
 
     setRoomId(cleanCode);
     if (currentUser) {
-      joinRoom(cleanCode, currentUser);
+      void joinRoom(cleanCode, currentUser);
     } else {
       setIsJoinModalOpen(true);
     }
   }, [currentUser, joinRoom]);
 
-  // Estimation Mode Toggle
+  // Estimation Mode Toggle (Host only)
   const handleToggleEstimationMode = (mode: 'GLOBAL' | 'DUAL') => {
     if (!roomState || !currentUser) return;
     const socket = getSocket();
     socket.emit('estimation_mode:toggle', {
       roomId: roomState.id,
-      mode
+      mode,
+      hostToken: getHostToken()
     });
     setToastMessage(`Mode d'estimation passé à : ${mode === 'DUAL' ? 'Double Vote (Back/Front)' : 'Vote Unique Global'} ⚡`);
     setTimeout(() => setToastMessage(null), 3000);
   };
 
   // Vote Submission
-  const handleSelectVote = (val: VoteValue, dimension: 'GLOBAL' | 'BACK' | 'FRONT' = 'GLOBAL') => {
+  const handleSelectVote = useCallback((val: VoteValue, dimension: 'GLOBAL' | 'BACK' | 'FRONT' = 'GLOBAL') => {
     if (!roomState || !currentUser) return;
     const socket = getSocket();
 
@@ -540,10 +591,10 @@ export default function App() {
       backValue,
       frontValue
     });
-  };
+  }, [roomState, currentUser, localVoteCache]);
 
   // Host Actions
-  const handleRevealVotes = () => {
+  const handleRevealVotes = useCallback(() => {
     if (!roomState || !currentUser) return;
     const socket = getSocket();
     socket.emit('vote:reveal', {
@@ -551,11 +602,10 @@ export default function App() {
       userId: currentUser.id,
       hostToken: getHostToken()
     });
-  };
+  }, [roomState, currentUser, getHostToken]);
 
-  const handleResetVotes = (nextStoryTitle?: string) => {
+  const handleResetVotes = useCallback((nextStoryTitle?: string) => {
     if (!roomState || !currentUser) return;
-    // Clear local vote cache on vote reset
     try {
       sessionStorage.removeItem('scrum_poker_current_vote_cache');
       setLocalVoteCache({});
@@ -569,14 +619,15 @@ export default function App() {
       nextStoryTitle,
       hostToken: getHostToken()
     });
-  };
+  }, [roomState, currentUser, getHostToken]);
 
   const handleUpdateStoryTitle = (newTitle: string) => {
     if (!roomState) return;
     const socket = getSocket();
     socket.emit('story:update', {
       roomId: roomState.id,
-      storyTitle: newTitle
+      storyTitle: newTitle,
+      hostToken: getHostToken()
     });
   };
 
@@ -585,7 +636,8 @@ export default function App() {
     const socket = getSocket();
     socket.emit('backlog:update', {
       roomId: roomState.id,
-      backlog: newBacklog
+      backlog: newBacklog,
+      hostToken: getHostToken()
     });
   };
 
@@ -594,7 +646,8 @@ export default function App() {
     const socket = getSocket();
     socket.emit('story:select_from_backlog', {
       roomId: roomState.id,
-      storyTitle
+      storyTitle,
+      hostToken: getHostToken()
     });
     setToastMessage(`Story changée : "${storyTitle}" 🚀`);
     setTimeout(() => setToastMessage(null), 3000);
@@ -642,7 +695,8 @@ export default function App() {
     const socket = getSocket();
     socket.emit('vote:nudge', {
       roomId: roomState.id,
-      targetUserId
+      targetUserId,
+      hostToken: getHostToken()
     });
   };
 
@@ -661,7 +715,6 @@ export default function App() {
     if (!roomState || !currentUser) return;
     const socket = getSocket();
     
-    // We pass the percentage to make it responsive for other clients
     const xPct = (clientX / window.innerWidth) * 100;
     const yPct = (clientY / window.innerHeight) * 100;
 
@@ -717,7 +770,6 @@ export default function App() {
     if (!currentUser) return;
     const updatedUser = { ...currentUser, ...updates };
     saveUser(updatedUser);
-    setCurrentUser(updatedUser);
     
     if (roomState) {
       const socket = getSocket();
@@ -735,9 +787,12 @@ export default function App() {
   const handleResetTimer = useCallback(() => {
     if (roomState) {
       const socket = getSocket();
-      socket.emit('timer:reset', { roomId: roomState.id });
+      socket.emit('timer:reset', {
+        roomId: roomState.id,
+        hostToken: getHostToken()
+      });
     }
-  }, [roomState]);
+  }, [roomState, getHostToken]);
 
   const handleStartSession = useCallback(() => {
     if (!roomState || !currentUser) return;
@@ -777,57 +832,68 @@ export default function App() {
     setTimeout(() => setToastMessage(null), 3000);
   };
 
-  const handleConfigTimer = (durationSeconds: number, autoReveal: boolean) => {
-    if (!roomState || !currentUser) return;
-    const socket = getSocket();
-    socket.emit('timer:config', {
-      roomId: roomState.id,
-      userId: currentUser.id,
-      durationSeconds,
-      autoReveal,
-      hostToken: getHostToken()
-    });
-    setToastMessage("Minuteur configuré");
-    setTimeout(() => setToastMessage(null), 3000);
-  };
-
   const handleGoogleSignIn = (googleUser: User) => {
     saveUser(googleUser);
     if (roomId) {
-      joinRoom(roomId, googleUser);
+      void joinRoom(roomId, googleUser);
     } else {
       // Auto create a room after Google Sign-In
       const newRoomCode = `scrum-${Math.random().toString(36).substring(2, 7)}`;
-      const newHostToken = `htoken-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-      localStorage.setItem(`scrum_poker_host_token_${newRoomCode}`, newHostToken);
-
-      joinRoom(newRoomCode, { ...googleUser, isHost: true, hostToken: newHostToken });
+      const creatorUser: User = { ...googleUser, isHost: true };
+      saveUser(creatorUser);
+      void joinRoom(newRoomCode, creatorUser, { isCreate: true });
     }
   };
 
-  // Keyboard shortcuts handler (R: reveal, S: reset, 0-9: vote)
+  // Keyboard shortcuts handler (Esc: close modal, R: reveal, S: reset, 0-9: vote from active deck)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Ignore if typing inside input, textarea, or contentEditable element
+      const anyModalOpen =
+        isGoogleAuthOpen ||
+        isHistoryOpen ||
+        isJoinModalOpen ||
+        isJoinByCodeOpen ||
+        isCustomizerOpen ||
+        isCreatedRoomsOpen ||
+        isBacklogOpen ||
+        isStatsOpen;
+
+      if (e.key === 'Escape' && anyModalOpen) {
+        setIsGoogleAuthOpen(false);
+        setIsHistoryOpen(false);
+        setIsJoinByCodeOpen(false);
+        setIsCustomizerOpen(false);
+        setIsCreatedRoomsOpen(false);
+        setIsBacklogOpen(false);
+        setIsStatsOpen(false);
+        return;
+      }
+
+      // Ignore if typing inside input, textarea, select, or contentEditable element
       const target = e.target as HTMLElement;
       if (
         target.tagName === 'INPUT' ||
         target.tagName === 'TEXTAREA' ||
+        target.tagName === 'SELECT' ||
         target.isContentEditable ||
         document.activeElement?.tagName === 'INPUT' ||
-        document.activeElement?.tagName === 'TEXTAREA'
+        document.activeElement?.tagName === 'TEXTAREA' ||
+        document.activeElement?.tagName === 'SELECT'
       ) {
         return;
       }
 
-      // Ignore if modals are open
-      if (isGoogleAuthOpen || isHistoryOpen || isJoinModalOpen || isCustomizerOpen) {
+      // Ignore if any modal is open
+      if (anyModalOpen) {
         return;
       }
 
       if (!roomState || !currentUser) return;
 
-      const isHost = currentUser.id === roomState.hostId;
+      const isHost = Boolean(
+        currentUser.id === roomState.hostId ||
+        roomState.participants[currentUser.id]?.isHost
+      );
       const keyUpper = e.key.toUpperCase();
 
       // 'R' -> Reveal votes (if host and votes are not revealed yet)
@@ -852,24 +918,24 @@ export default function App() {
         return;
       }
 
-      // Digits 0-9 -> Select voting card (when round is active)
-      if (!roomState.isRevealed && /^[0-9]$/.test(e.key)) {
-        e.preventDefault();
-        const digitMap: Record<string, VoteValue> = {
-          '0': 0,
-          '1': 1,
-          '2': 2,
-          '3': 3,
-          '4': 0.5,
-          '5': 5,
-          '6': 13,
-          '7': 21,
-          '8': 8,
-          '9': 34
-        };
-        const val = digitMap[e.key];
-        if (val !== undefined) {
-          handleSelectVote(val);
+      // Digits 0-9 -> Select voting card dynamically from active room deck (in GLOBAL mode)
+      if (
+        !roomState.isRevealed &&
+        roomState.estimationMode !== 'DUAL' &&
+        !roomState.participants[currentUser.id]?.isSpectator &&
+        /^[0-9]$/.test(e.key)
+      ) {
+        const activeDeck = getActiveDeckValues(roomState.deckType, roomState.deckValues);
+        let chosen: VoteValue | undefined;
+        if (e.key === '0') {
+          chosen = activeDeck.includes(0) ? 0 : activeDeck[9];
+        } else {
+          const idx = Number(e.key) - 1;
+          chosen = activeDeck[idx];
+        }
+        if (chosen !== undefined) {
+          e.preventDefault();
+          handleSelectVote(chosen);
         }
       }
     };
@@ -882,13 +948,26 @@ export default function App() {
     isGoogleAuthOpen,
     isHistoryOpen,
     isJoinModalOpen,
-    isCustomizerOpen
+    isJoinByCodeOpen,
+    isCustomizerOpen,
+    isCreatedRoomsOpen,
+    isBacklogOpen,
+    isStatsOpen,
+    handleRevealVotes,
+    handleResetVotes,
+    handleSelectVote
   ]);
 
   const isMatchingStory = Boolean(roomState && localVoteCache.roomId === roomState.id && localVoteCache.storyTitle === roomState.currentStory);
   const myVote = (currentUser && roomState?.participants[currentUser.id]?.value) ?? (isMatchingStory && !roomState?.isRevealed ? localVoteCache.value : undefined);
   const myBackVote = (currentUser && roomState?.participants[currentUser.id]?.backValue) ?? (isMatchingStory && !roomState?.isRevealed ? localVoteCache.backValue : undefined);
   const myFrontVote = (currentUser && roomState?.participants[currentUser.id]?.frontValue) ?? (isMatchingStory && !roomState?.isRevealed ? localVoteCache.frontValue : undefined);
+
+  const isCurrentUserHost = Boolean(
+    currentUser &&
+    roomState &&
+    (currentUser.id === roomState.hostId || roomState.participants[currentUser.id]?.isHost)
+  );
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-indigo-500 selection:text-white relative">
@@ -927,7 +1006,6 @@ export default function App() {
               selectedEmoji={selectedEmoji}
               onThrowEmoji={handleThrowEmoji}
               onResetTimer={handleResetTimer}
-              onConfigTimer={handleConfigTimer}
               onOpenBacklog={() => setIsBacklogOpen(true)}
               onSelectBacklogStory={handleSelectBacklogStory}
               onStartSession={handleStartSession}
@@ -942,7 +1020,7 @@ export default function App() {
                 estimationMode={roomState.estimationMode}
                 participants={roomState.participants}
                 currentStory={roomState.currentStory}
-                isHost={Boolean(currentUser && (currentUser.id === roomState.hostId || roomState.participants[currentUser.id]?.isHost))}
+                isHost={isCurrentUserHost}
                 currentHistoryItem={roomState.history[0]}
                 onArbitrate={handleArbitrateHistoryItem}
               />
@@ -960,7 +1038,7 @@ export default function App() {
                 disabled={!currentUser}
                 isSpectator={Boolean(currentUser && roomState.participants[currentUser.id]?.isSpectator)}
                 onToggleSpectator={handleToggleSpectator}
-                isHost={Boolean(currentUser && (currentUser.id === roomState.hostId || roomState.participants[currentUser.id]?.isHost))}
+                isHost={isCurrentUserHost}
                 onToggleEstimationMode={handleToggleEstimationMode}
               />
             )}
@@ -988,6 +1066,7 @@ export default function App() {
         currentUser={currentUser}
         onGoogleSignIn={handleGoogleSignIn}
         onSignOut={() => {
+          void googleSignOut().catch(() => {});
           setCurrentUser(null);
           localStorage.removeItem('scrum_poker_user');
         }}
@@ -1005,7 +1084,7 @@ export default function App() {
         roomHostName={roomState?.hostName}
         onJoin={(user) => {
           saveUser(user);
-          joinRoom(roomId, user);
+          void joinRoom(roomId, user);
           setIsJoinModalOpen(false);
         }}
         onOpenGoogleAuth={() => {
@@ -1018,7 +1097,9 @@ export default function App() {
         isOpen={isHistoryOpen}
         onClose={() => setIsHistoryOpen(false)}
         history={roomState?.history || []}
-        isHost={Boolean(currentUser && (currentUser.id === roomState?.hostId || roomState?.participants[currentUser.id]?.isHost))}
+        isHost={isCurrentUserHost}
+        deckType={roomState?.deckType || 'fibonacci'}
+        deckValues={roomState?.deckValues}
         onClearHistory={handleClearHistory}
         onDeleteHistoryItems={handleDeleteHistoryItems}
         onOpenCreatedRooms={() => setIsCreatedRoomsOpen(true)}
@@ -1049,7 +1130,7 @@ export default function App() {
         backlog={roomState?.backlog || []}
         currentStory={roomState?.currentStory || ''}
         history={roomState?.history || []}
-        isHost={Boolean(currentUser && (currentUser.id === roomState?.hostId || roomState?.participants[currentUser.id]?.isHost))}
+        isHost={isCurrentUserHost}
         onUpdateBacklog={handleUpdateBacklog}
         onSelectAndStartStory={handleSelectBacklogStory}
       />
@@ -1074,7 +1155,7 @@ export default function App() {
       )}
 
       {/* Reconnection Overlay Modal */}
-      <ReconnectionModal isOpen={!isConnected} />
+      <ReconnectionModal isOpen={hasConnectedOnce && !isConnected} />
     </div>
   );
 }

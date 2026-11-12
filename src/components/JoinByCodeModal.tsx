@@ -49,7 +49,12 @@ export const JoinByCodeModal: React.FC<JoinByCodeModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4 animate-in fade-in duration-200">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Rejoindre une Salle"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4 animate-in fade-in duration-200"
+    >
       <div className="bg-[#14171D] border border-[#242933] text-[#E2E8F0] rounded-3xl p-6 sm:p-8 max-w-md w-full shadow-2xl relative overflow-hidden">
         {/* Close Button */}
         <button

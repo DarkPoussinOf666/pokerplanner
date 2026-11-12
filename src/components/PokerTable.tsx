@@ -227,7 +227,7 @@ export const PokerTable: React.FC<PokerTableProps> = ({
               >
                 <Clock className={`w-3.5 h-3.5 ${!roomState.isRevealed ? 'text-indigo-400 animate-pulse' : 'text-amber-400'}`} />
                 <span className="font-mono text-[11px] tracking-wide">{formatTime(elapsedSeconds)}</span>
-                {onResetTimer && (
+                {isHost && onResetTimer && (
                   <button
                     type="button"
                     onClick={(e) => {
@@ -293,7 +293,7 @@ export const PokerTable: React.FC<PokerTableProps> = ({
             )}
           </div>
 
-          {isEditingStory ? (
+          {isHost && isEditingStory ? (
             <form onSubmit={handleStorySubmit} onClick={(e) => e.stopPropagation()} className="flex items-center gap-2">
               <div className="relative flex-1">
                 <input
@@ -327,30 +327,36 @@ export const PokerTable: React.FC<PokerTableProps> = ({
             </form>
           ) : (
             <div>
-              <div
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setStoryInput(roomState.currentStory);
-                  setIsEditingStory(true);
-                }}
-                className="flex items-center gap-2 group cursor-pointer"
-                title="Modifier le titre"
-              >
-                <h2 className="text-base sm:text-lg font-semibold text-slate-100 group-hover:text-indigo-300 transition-colors tracking-tight truncate">
+              {isHost ? (
+                <div
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setStoryInput(roomState.currentStory);
+                    setIsEditingStory(true);
+                  }}
+                  className="flex items-center gap-2 group cursor-pointer"
+                  title="Modifier le titre"
+                >
+                  <h2 className="text-base sm:text-lg font-semibold text-slate-100 group-hover:text-indigo-300 transition-colors tracking-tight truncate">
+                    {roomState.currentStory}
+                  </h2>
+                  <button
+                    type="button"
+                    className="p-1 text-slate-400 hover:text-indigo-400 bg-slate-900/60 hover:bg-slate-800 border border-slate-800/80 rounded-lg transition-colors shrink-0"
+                    title="Modifier"
+                  >
+                    <Edit3 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              ) : (
+                <h2 className="text-base sm:text-lg font-semibold text-slate-100 tracking-tight truncate">
                   {roomState.currentStory}
                 </h2>
-                <button
-                  type="button"
-                  className="p-1 text-slate-400 hover:text-indigo-400 bg-slate-900/60 hover:bg-slate-800 border border-slate-800/80 rounded-lg transition-colors shrink-0"
-                  title="Modifier"
-                >
-                  <Edit3 className="w-3.5 h-3.5" />
-                </button>
-              </div>
+              )}
 
-              {/* Backlog Quick Dropdown */}
+              {/* Backlog Quick Dropdown & Viewer */}
               <div className="flex items-center gap-2 mt-2 flex-wrap" onClick={(e) => e.stopPropagation()}>
-                {roomState.backlog && roomState.backlog.length > 0 && (
+                {isHost && roomState.backlog && roomState.backlog.length > 0 && (
                   <div className="flex items-center gap-1.5 bg-[#0B0E16] border border-slate-800 rounded-lg px-2.5 py-1">
                     <span className="text-[11px] text-slate-400 font-medium flex items-center gap-1 shrink-0">
                       <ListTodo className="w-3.5 h-3.5 text-indigo-400" /> Backlog :
@@ -390,21 +396,23 @@ export const PokerTable: React.FC<PokerTableProps> = ({
                   </div>
                 )}
 
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (onOpenBacklog) onOpenBacklog();
-                  }}
-                  className="px-2.5 py-1 bg-slate-900/70 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-800/90 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5 cursor-pointer"
-                >
-                  <ListTodo className="w-3.5 h-3.5 text-indigo-400" />
-                  <span>Gérer le Backlog</span>
-                  {roomState.backlog && roomState.backlog.length > 0 && (
-                    <span className="bg-indigo-500/20 text-indigo-300 px-1.5 py-0.2 rounded-full text-[10px] font-bold">
-                      {roomState.backlog.length}
-                    </span>
-                  )}
-                </button>
+                {(isHost || (roomState.backlog && roomState.backlog.length > 0)) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (onOpenBacklog) onOpenBacklog();
+                    }}
+                    className="px-2.5 py-1 bg-slate-900/70 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-800/90 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <ListTodo className="w-3.5 h-3.5 text-indigo-400" />
+                    <span>{isHost ? 'Gérer le Backlog' : 'Voir le Backlog'}</span>
+                    {roomState.backlog && roomState.backlog.length > 0 && (
+                      <span className="bg-indigo-500/20 text-indigo-300 px-1.5 py-0.2 rounded-full text-[10px] font-bold">
+                        {roomState.backlog.length}
+                      </span>
+                    )}
+                  </button>
+                )}
               </div>
             </div>
           )}
@@ -916,13 +924,19 @@ export const PokerTable: React.FC<PokerTableProps> = ({
                       {p.userName}
                     </span>
                     {p.isSpectator && (
-                      <Eye className="w-3 h-3 text-indigo-400 shrink-0" title="Spectateur" />
+                      <span title="Spectateur" aria-label="Spectateur" className="inline-flex shrink-0">
+                        <Eye className="w-3 h-3 text-indigo-400" />
+                      </span>
                     )}
                     {p.isGoogleAuth && (
-                      <ShieldCheck className="w-3 h-3 text-emerald-400 shrink-0" title="Authentifié Google" />
+                      <span title="Authentifié Google" aria-label="Authentifié Google" className="inline-flex shrink-0">
+                        <ShieldCheck className="w-3 h-3 text-emerald-400" />
+                      </span>
                     )}
                     {p.isOffline && (
-                      <WifiOff className="w-3 h-3 text-amber-500/80 shrink-0" title="Hors ligne" />
+                      <span title="Hors ligne" aria-label="Hors ligne" className="inline-flex shrink-0">
+                        <WifiOff className="w-3 h-3 text-amber-500/80" />
+                      </span>
                     )}
                   </div>
                   {isCurrent && (

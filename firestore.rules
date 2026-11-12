@@ -1,14 +1,24 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Rooms collection: Managed by backend for room synchronization, listing and persistence
+    // Rooms collection: Managed by backend with bounded queries and schema validation
     match /rooms/{roomId} {
-      allow read, write: if true;
+      allow get: if true;
+      allow list: if request.query.limit != null && request.query.limit <= 15;
+      allow create, update: if request.resource.data.keys().hasAll(['id', 'name', 'hostId', 'createdTimestamp', 'expireAt'])
+        && request.resource.data.id == roomId
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.name.size() <= 120
+        && request.resource.data.hostId is string
+        && request.resource.data.hostId.size() <= 128;
+      allow delete: if true;
     }
 
-    // Users collection
+    // Users collection: Locked down (no direct client access)
     match /users/{userId} {
-      allow read, write: if true;
+      allow read, write: if false;
     }
   }
 }
+

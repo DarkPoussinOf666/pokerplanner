@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ParticipantVote, VoteValue, HistoryItem, DeckType } from '../types';
+import { ParticipantVote, VoteValue, HistoryItem, DeckType, ArbitrateHandler } from '../types';
 import { motion } from 'motion/react';
 import {
   Calculator,
@@ -14,7 +14,7 @@ import {
   Check
 } from 'lucide-react';
 import { AvatarDisplay } from './AvatarDisplay';
-import { DECK_PRESETS } from '../constants/avatars';
+import { calculateValueStats, findNearestDeckValue, getActiveDeckValues } from '../lib/stats';
 
 interface RevealStatsProps {
   deckType?: DeckType;
@@ -24,7 +24,7 @@ interface RevealStatsProps {
   currentStory: string;
   isHost?: boolean;
   currentHistoryItem?: HistoryItem;
-  onArbitrate?: (historyId: string, finalScore: VoteValue, backFinalScore?: VoteValue, frontFinalScore?: VoteValue) => void;
+  onArbitrate?: ArbitrateHandler;
 }
 
 export const RevealStats: React.FC<RevealStatsProps> = ({
@@ -42,64 +42,16 @@ export const RevealStats: React.FC<RevealStatsProps> = ({
   const [customFrontValue, setCustomFrontValue] = useState<string>('');
   const isDual = estimationMode === 'DUAL';
 
-  const deckChoices = (deckType === 'custom' && deckValues && deckValues.length > 0)
-    ? deckValues
-    : (DECK_PRESETS[deckType]?.values || DECK_PRESETS.fibonacci.values);
+  const deckChoices = getActiveDeckValues(deckType, deckValues);
   const votesList = (Object.values(participants || {}) as ParticipantVote[]).filter(p => p.hasVoted);
 
-  // Helper for stats calculation
-  const getDimensionStats = (getter: (p: ParticipantVote) => VoteValue | undefined) => {
-    const validVotes = votesList.filter(p => getter(p) !== undefined);
-    const numericVotes = validVotes
-      .map(p => getter(p))
-      .filter((v): v is number => typeof v === 'number');
-
-    const average = numericVotes.length > 0
-      ? Math.round((numericVotes.reduce((a, b) => a + b, 0) / numericVotes.length) * 10) / 10
-      : null;
-
-    const distribution: Record<string, number> = {};
-    validVotes.forEach(p => {
-      const v = getter(p);
-      if (v !== undefined) {
-        const key = String(v);
-        distribution[key] = (distribution[key] || 0) + 1;
-      }
-    });
-
-    let mode: VoteValue | null = null;
-    let maxCount = 0;
-    let topValues: string[] = [];
-
-    Object.entries(distribution).forEach(([valStr, count]) => {
-      if (count > maxCount) {
-        maxCount = count;
-        topValues = [valStr];
-      } else if (count === maxCount) {
-        topValues.push(valStr);
-      }
-    });
-
-    if (topValues.length === 1 && (validVotes.length === 1 || maxCount > 1)) {
-      const valStr = topValues[0];
-      const parsed = parseFloat(valStr);
-      if (!isNaN(parsed) && valStr !== '☕' && valStr !== '?') {
-        mode = parsed;
-      } else {
-        mode = valStr as VoteValue;
-      }
-    }
-
-    return { validVotes, numericVotes, average, distribution, mode, maxCount };
-  };
-
-  const globalStats = getDimensionStats(p => p.value);
-  const backStats = getDimensionStats(p => p.backValue);
-  const frontStats = getDimensionStats(p => p.frontValue);
+  const globalStats = calculateValueStats(votesList, p => p.value);
+  const backStats = calculateValueStats(votesList, p => p.backValue);
+  const frontStats = calculateValueStats(votesList, p => p.frontValue);
 
   const numericVotes = isDual
-    ? [...backStats.numericVotes, ...frontStats.numericVotes]
-    : globalStats.numericVotes;
+    ? [...backStats.numericValues, ...frontStats.numericValues]
+    : globalStats.numericValues;
 
   const average = isDual
     ? (typeof backStats.average === 'number' && typeof frontStats.average === 'number'
@@ -107,49 +59,55 @@ export const RevealStats: React.FC<RevealStatsProps> = ({
         : (backStats.average ?? frontStats.average ?? null))
     : globalStats.average;
 
-  const activeDistribution = globalStats.distribution;
-  const maxCount = isDual
-    ? Math.max(backStats.maxCount, frontStats.maxCount)
-    : globalStats.maxCount;
-  const activeMode = globalStats.mode;
+  const activeDistribution = isDual
+    ? Object.entries(backStats.distribution).reduce<Record<string, number>>((acc, [k, v]) => {
+        acc[`BK ${k}`] = v;
+        return acc;
+      }, Object.entries(frontStats.distribution).reduce<Record<string, number>>((acc, [k, v]) => {
+        acc[`FR ${k}`] = v;
+        return acc;
+      }, {}))
+    : globalStats.distribution;
+
+  const activeMode = isDual
+    ? (backStats.mode !== null && frontStats.mode !== null
+        ? (typeof backStats.mode === 'number' && typeof frontStats.mode === 'number'
+            ? backStats.mode + frontStats.mode
+            : `${backStats.mode}/${frontStats.mode}`)
+        : (backStats.mode ?? frontStats.mode))
+    : globalStats.mode;
 
   // Consensus Status
-  const backConsensus = isDual && backStats.numericVotes.length > 0 && backStats.numericVotes.every(v => v === backStats.numericVotes[0]);
-  const frontConsensus = isDual && frontStats.numericVotes.length > 0 && frontStats.numericVotes.every(v => v === frontStats.numericVotes[0]);
-  const globalConsensus = !isDual && globalStats.numericVotes.length > 0 && globalStats.numericVotes.every(v => v === globalStats.numericVotes[0]);
-
-  const isPerfectConsensus = isDual ? (backConsensus && frontConsensus) : globalConsensus;
+  const isPerfectConsensus = isDual
+    ? (backStats.isUnanimous && frontStats.isUnanimous)
+    : globalStats.isUnanimous;
 
   const minVal = numericVotes.length > 0 ? Math.min(...numericVotes) : null;
   const maxVal = numericVotes.length > 0 ? Math.max(...numericVotes) : null;
 
-  const backSpread = isDual && backStats.numericVotes.length > 0 && (Math.max(...backStats.numericVotes) - Math.min(...backStats.numericVotes) >= 5);
-  const frontSpread = isDual && frontStats.numericVotes.length > 0 && (Math.max(...frontStats.numericVotes) - Math.min(...frontStats.numericVotes) >= 5);
+  const backSpread = isDual && backStats.numericValues.length > 0 && (Math.max(...backStats.numericValues) - Math.min(...backStats.numericValues) >= 5);
+  const frontSpread = isDual && frontStats.numericValues.length > 0 && (Math.max(...frontStats.numericValues) - Math.min(...frontStats.numericValues) >= 5);
   const globalSpread = !isDual && minVal !== null && maxVal !== null && (maxVal - minVal >= 5);
 
   const hasSpread = isDual ? (backSpread || frontSpread) : globalSpread;
 
-  const nearestDeckValue = (num: number): VoteValue => {
-    const numCards = deckChoices.filter((c): c is number => typeof c === 'number');
-    if (numCards.length === 0) return num;
-    return numCards.reduce((prev, curr) => (Math.abs(curr - num) < Math.abs(prev - num) ? curr : prev));
-  };
+  const nearestDeckValue = (num: number): VoteValue => findNearestDeckValue(num, deckType, deckValues);
 
-  const backActiveScore = currentHistoryItem?.backFinalScore !== undefined
+  const backActiveScore = currentHistoryItem?.backFinalScore !== undefined && currentHistoryItem.backFinalScore !== null
     ? currentHistoryItem.backFinalScore
     : (backStats.mode !== null ? backStats.mode : (backStats.average !== null ? nearestDeckValue(backStats.average) : null));
 
-  const frontActiveScore = currentHistoryItem?.frontFinalScore !== undefined
+  const frontActiveScore = currentHistoryItem?.frontFinalScore !== undefined && currentHistoryItem.frontFinalScore !== null
     ? currentHistoryItem.frontFinalScore
     : (frontStats.mode !== null ? frontStats.mode : (frontStats.average !== null ? nearestDeckValue(frontStats.average) : null));
 
-  const activeFinalScore = currentHistoryItem?.finalScore !== undefined
+  const activeFinalScore = currentHistoryItem?.finalScore !== undefined && currentHistoryItem.finalScore !== null
     ? currentHistoryItem.finalScore
     : (isDual
         ? (typeof backActiveScore === 'number' && typeof frontActiveScore === 'number'
             ? backActiveScore + frontActiveScore
             : null)
-        : (activeMode !== null ? activeMode : (average !== null ? nearestDeckValue(average) : null)));
+        : (globalStats.mode !== null ? globalStats.mode : (average !== null ? nearestDeckValue(average) : null)));
 
   const handleSelectArbitrate = (val: VoteValue, dimension: 'GLOBAL' | 'BACK' | 'FRONT' = 'GLOBAL') => {
     if (!onArbitrate) return;

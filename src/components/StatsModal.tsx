@@ -85,18 +85,25 @@ export const StatsModal: React.FC<StatsModalProps> = ({
     let totalDurationSecs = 0;
     let perfectConsensusCount = 0;
 
-    const firstVotersMap: Record<string, number> = {};
+    const firstVotersMap: Record<string, { count: number; name: string }> = {};
     const participantMap: Record<string, ParticipantMetric> = {};
 
-    let mostDebatedStory: { title: string; spread: number; duration: number } | null = null;
+    let mostDebatedStory = null as { title: string; spread: number; duration: number } | null;
 
     history.forEach(item => {
       const isDual = item.estimationMode === 'DUAL';
       if (isDual) hasDualItems = true;
 
-      // First voter tracking from history item
-      if (item.firstVoterName) {
-        firstVotersMap[item.firstVoterName] = (firstVotersMap[item.firstVoterName] || 0) + 1;
+      // First voter tracking from history item (keyed by userId when available)
+      const firstKey = item.firstVoterId || item.firstVoterName;
+      if (firstKey) {
+        if (!firstVotersMap[firstKey]) {
+          firstVotersMap[firstKey] = { count: 0, name: item.firstVoterName || 'Anonyme' };
+        }
+        firstVotersMap[firstKey].count += 1;
+        if (item.firstVoterName) {
+          firstVotersMap[firstKey].name = item.firstVoterName;
+        }
       }
 
       // Final score calculation
@@ -173,12 +180,13 @@ export const StatsModal: React.FC<StatsModalProps> = ({
         }
       }
 
-      // Process participant votes
+      // Process participant votes (keyed by userId to survive renames and avoid duplicate-name collisions)
       item.votes.forEach(v => {
-        const name = v.userName || 'Anonyme';
-        if (!participantMap[name]) {
-          participantMap[name] = {
-            userName: name,
+        const key = v.userId || v.userName || 'Anonyme';
+        const latestName = (v.userId ? roomState?.participants?.[v.userId]?.userName : undefined) || v.userName || 'Anonyme';
+        if (!participantMap[key]) {
+          participantMap[key] = {
+            userName: latestName,
             totalVotes: 0,
             totalNumericVotes: 0,
             totalAbsoluteDiff: 0,
@@ -193,7 +201,7 @@ export const StatsModal: React.FC<StatsModalProps> = ({
           };
         }
 
-        const pStat = participantMap[name];
+        const pStat = participantMap[key];
         pStat.totalVotes++;
 
         if (v.value === '☕' || v.backValue === '☕' || v.frontValue === '☕') {
@@ -234,26 +242,24 @@ export const StatsModal: React.FC<StatsModalProps> = ({
     });
 
     // Merge first voters counts
-    Object.entries(firstVotersMap).forEach(([name, count]) => {
-      if (participantMap[name]) {
-        participantMap[name].firstVoterCount = count;
+    Object.entries(firstVotersMap).forEach(([key, info]) => {
+      if (participantMap[key]) {
+        participantMap[key].firstVoterCount = info.count;
+      } else {
+        const byName = Object.values(participantMap).find(p => p.userName === info.name);
+        if (byName) {
+          byName.firstVoterCount += info.count;
+        }
       }
     });
 
-    // Merge emoji counts from roomEmojiStats
+    // Merge emoji counts from roomEmojiStats (userCounts keys are userIds on server)
     if (emojiStats?.userCounts) {
-      const userList = Object.values(emojiStats.userCounts) as Array<{
-        userName: string;
-        count: number;
-        emojis?: Record<string, number>;
-      }>;
-
-      userList.forEach(u => {
-        const name = u.userName;
-        let p = participantMap[name];
+      Object.entries(emojiStats.userCounts).forEach(([senderKey, u]) => {
+        let p = participantMap[senderKey] || Object.values(participantMap).find(entry => entry.userName === u.userName);
         if (!p) {
           p = {
-            userName: name,
+            userName: roomState?.participants?.[senderKey]?.userName || u.userName || 'Anonyme',
             totalVotes: 0,
             totalNumericVotes: 0,
             totalAbsoluteDiff: 0,
@@ -266,7 +272,7 @@ export const StatsModal: React.FC<StatsModalProps> = ({
             firstVoterCount: 0,
             emojisSent: 0
           };
-          participantMap[name] = p;
+          participantMap[senderKey] = p;
         }
         p.emojisSent = u.count;
         if (u.emojis) {
@@ -398,7 +404,7 @@ export const StatsModal: React.FC<StatsModalProps> = ({
         ? (Object.values(emojiStats.userCounts) as Array<{ userName: string; count: number; emojis?: Record<string, number> }>).sort((a, b) => b.count - a.count)
         : []
     };
-  }, [history, emojiStats]);
+  }, [history, emojiStats, roomState]);
 
   if (!isOpen) return null;
 
@@ -426,7 +432,12 @@ export const StatsModal: React.FC<StatsModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-5 bg-black/80 backdrop-blur-md animate-in fade-in duration-200">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Statistiques et Rétro de Chiffrage"
+      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-5 bg-black/80 backdrop-blur-md animate-in fade-in duration-200"
+    >
       <div className="bg-[#10141D] border border-slate-800 text-slate-100 w-full max-w-4xl max-h-[92vh] rounded-3xl p-5 sm:p-6 shadow-2xl flex flex-col overflow-hidden relative">
         
         {/* Subtle decorative background gradient circles */}

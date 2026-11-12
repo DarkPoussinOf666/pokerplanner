@@ -146,7 +146,12 @@ export const BacklogModal: React.FC<BacklogModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md animate-in fade-in duration-200">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Backlog de la session"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md animate-in fade-in duration-200"
+    >
       <div className="bg-[#14171D] border border-[#242933] text-[#E2E8F0] w-full max-w-2xl max-h-[85vh] rounded-2xl p-6 shadow-2xl flex flex-col justify-between overflow-hidden relative">
         {/* Modal Header */}
         <div className="shrink-0 pb-4 border-b border-[#242933]">
@@ -157,13 +162,15 @@ export const BacklogModal: React.FC<BacklogModalProps> = ({
               </div>
               <div>
                 <h3 className="text-xl font-extrabold text-white tracking-tight flex items-center gap-2">
-                  Préparation du Backlog
+                  {isHost ? 'Préparation du Backlog' : 'Backlog de la Session'}
                   <span className="text-xs bg-blue-500/20 text-blue-300 border border-blue-500/30 font-bold px-2 py-0.5 rounded-full">
                     {backlog.length} US
                   </span>
                 </h3>
                 <p className="text-xs text-slate-400 mt-0.5">
-                  Saisissez vos User Stories à l'avance pour enchaîner les chiffrages durant la session.
+                  {isHost
+                    ? "Saisissez vos User Stories à l'avance pour enchaîner les chiffrages durant la session."
+                    : "Consultez la liste des User Stories prévues pour cette session de chiffrage."}
                 </p>
               </div>
             </div>
@@ -177,55 +184,59 @@ export const BacklogModal: React.FC<BacklogModalProps> = ({
             </button>
           </div>
 
-          {/* Tab Navigation */}
-          <div className="flex items-center gap-2 mt-2 bg-[#0B0D10] p-1 rounded-xl border border-[#242933]">
-            <button
-              onClick={() => setActiveTab('list')}
-              className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2 ${
-                activeTab === 'list'
-                  ? 'bg-blue-600 text-white shadow-md'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-[#14171D]'
-              }`}
-            >
-              <Layers className="w-3.5 h-3.5" />
-              <span>Liste des US ({backlog.length})</span>
-            </button>
-            <button
-              onClick={() => setActiveTab('batch')}
-              className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2 ${
-                activeTab === 'batch'
-                  ? 'bg-blue-600 text-white shadow-md'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-[#14171D]'
-              }`}
-            >
-              <ListPlus className="w-3.5 h-3.5" />
-              <span>Saisie rapide en lot (Copier/Coller)</span>
-            </button>
-          </div>
+          {/* Tab Navigation (Host only) */}
+          {isHost && (
+            <div className="flex items-center gap-2 mt-2 bg-[#0B0D10] p-1 rounded-xl border border-[#242933]">
+              <button
+                onClick={() => setActiveTab('list')}
+                className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2 ${
+                  activeTab === 'list'
+                    ? 'bg-blue-600 text-white shadow-md'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-[#14171D]'
+                }`}
+              >
+                <Layers className="w-3.5 h-3.5" />
+                <span>Liste des US ({backlog.length})</span>
+              </button>
+              <button
+                onClick={() => setActiveTab('batch')}
+                className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2 ${
+                  activeTab === 'batch'
+                    ? 'bg-blue-600 text-white shadow-md'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-[#14171D]'
+                }`}
+              >
+                <ListPlus className="w-3.5 h-3.5" />
+                <span>Saisie rapide en lot (Copier/Coller)</span>
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Modal Body */}
         <div className="flex-1 overflow-y-auto my-4 pr-1 space-y-4 custom-scrollbar">
-          {activeTab === 'list' ? (
+          {!isHost || activeTab === 'list' ? (
             <>
-              {/* Single US add input */}
-              <form onSubmit={handleAddSingle} className="flex items-center gap-2">
-                <input
-                  type="text"
-                  placeholder="Ex: US-05: Authentification à deux facteurs (2FA)..."
-                  value={singleTitle}
-                  onChange={(e) => setSingleTitle(e.target.value)}
-                  className="flex-1 bg-[#0B0D10] border border-[#242933] focus:border-blue-500 rounded-xl px-3.5 py-2 text-sm text-white placeholder-slate-500 outline-none transition-all"
-                />
-                <button
-                  type="submit"
-                  disabled={!singleTitle.trim()}
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-bold rounded-xl text-xs transition-all shadow-md flex items-center gap-1.5 shrink-0 cursor-pointer"
-                >
-                  <Plus className="w-4 h-4" />
-                  <span>Ajouter</span>
-                </button>
-              </form>
+              {/* Single US add input (Host only) */}
+              {isHost && (
+                <form onSubmit={handleAddSingle} className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    placeholder="Ex: US-05: Authentification à deux facteurs (2FA)..."
+                    value={singleTitle}
+                    onChange={(e) => setSingleTitle(e.target.value)}
+                    className="flex-1 bg-[#0B0D10] border border-[#242933] focus:border-blue-500 rounded-xl px-3.5 py-2 text-sm text-white placeholder-slate-500 outline-none transition-all"
+                  />
+                  <button
+                    type="submit"
+                    disabled={!singleTitle.trim()}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-bold rounded-xl text-xs transition-all shadow-md flex items-center gap-1.5 shrink-0 cursor-pointer"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>Ajouter</span>
+                  </button>
+                </form>
+              )}
 
               {/* Selection Bar */}
               {isHost && backlog.length > 0 && (
@@ -266,7 +277,9 @@ export const BacklogModal: React.FC<BacklogModalProps> = ({
                   <ListTodo className="w-12 h-12 text-slate-600 mx-auto mb-3 opacity-40" />
                   <h4 className="text-sm font-bold text-slate-300">Aucune User Story préparée</h4>
                   <p className="text-xs text-slate-500 max-w-sm mx-auto mt-1 mb-4">
-                    Saisissez vos titres d'US ci-dessus ou basculez sur l'onglet "Saisie en lot" pour en coller plusieurs d'un coup.
+                    {isHost
+                      ? "Saisissez vos titres d'US ci-dessus ou basculez sur l'onglet \"Saisie en lot\" pour en coller plusieurs d'un coup."
+                      : "L'hôte de la session n'a pas encore ajouté de User Stories au backlog."}
                   </p>
                 </div>
               ) : (
@@ -307,7 +320,7 @@ export const BacklogModal: React.FC<BacklogModalProps> = ({
                             #{index + 1}
                           </span>
 
-                          {editingId === item.id ? (
+                          {isHost && editingId === item.id ? (
                             <div className="flex items-center gap-2 flex-1">
                               <input
                                 type="text"
@@ -347,41 +360,43 @@ export const BacklogModal: React.FC<BacklogModalProps> = ({
                           )}
                         </div>
 
-                        {/* Actions */}
-                        <div className="flex items-center gap-1.5 shrink-0 justify-end">
-                          {editingId !== item.id && (
+                        {/* Actions (Host only) */}
+                        {isHost && (
+                          <div className="flex items-center gap-1.5 shrink-0 justify-end">
+                            {editingId !== item.id && (
+                              <button
+                                onClick={() => handleStartEditing(item)}
+                                className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-[#242933] transition-colors"
+                                title="Modifier"
+                              >
+                                <Edit3 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+
                             <button
-                              onClick={() => handleStartEditing(item)}
-                              className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-[#242933] transition-colors"
-                              title="Modifier"
+                              onClick={() => handleDeleteItem(item.id)}
+                              className="p-1.5 text-slate-400 hover:text-rose-400 rounded-lg hover:bg-rose-500/10 transition-colors"
+                              title="Supprimer"
                             >
-                              <Edit3 className="w-3.5 h-3.5" />
+                              <Trash2 className="w-3.5 h-3.5" />
                             </button>
-                          )}
 
-                          <button
-                            onClick={() => handleDeleteItem(item.id)}
-                            className="p-1.5 text-slate-400 hover:text-rose-400 rounded-lg hover:bg-rose-500/10 transition-colors"
-                            title="Supprimer"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-
-                          <button
-                            onClick={() => {
-                              onSelectAndStartStory(item.title);
-                              onClose();
-                            }}
-                            className={`px-3 py-1.5 font-extrabold rounded-lg text-xs transition-all flex items-center gap-1.5 cursor-pointer ${
-                              isActive
-                                ? 'bg-blue-600/30 text-blue-300 border border-blue-500/40 cursor-default'
-                                : 'bg-blue-600 hover:bg-blue-500 text-white shadow-md shadow-blue-950/40'
-                            }`}
-                          >
-                            <Play className="w-3 h-3 fill-current" />
-                            <span>{isActive ? 'Relancer' : 'Go 🚀'}</span>
-                          </button>
-                        </div>
+                            <button
+                              onClick={() => {
+                                onSelectAndStartStory(item.title);
+                                onClose();
+                              }}
+                              className={`px-3 py-1.5 font-extrabold rounded-lg text-xs transition-all flex items-center gap-1.5 cursor-pointer ${
+                                isActive
+                                  ? 'bg-blue-600/30 text-blue-300 border border-blue-500/40 cursor-default'
+                                  : 'bg-blue-600 hover:bg-blue-500 text-white shadow-md shadow-blue-950/40'
+                              }`}
+                            >
+                              <Play className="w-3 h-3 fill-current" />
+                              <span>{isActive ? 'Relancer' : 'Go 🚀'}</span>
+                            </button>
+                          </div>
+                        )}
                       </div>
                     );
                   })}
@@ -435,7 +450,7 @@ export const BacklogModal: React.FC<BacklogModalProps> = ({
         {/* Modal Footer */}
         <div className="shrink-0 pt-3 border-t border-[#242933] flex items-center justify-between text-xs text-slate-500">
           <div className="flex items-center gap-3">
-            {backlog.length > 0 && (
+            {isHost && backlog.length > 0 && (
               <button
                 onClick={handleClearAll}
                 className="text-slate-500 hover:text-rose-400 transition-colors flex items-center gap-1 cursor-pointer"

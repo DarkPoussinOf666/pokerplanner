@@ -488,7 +488,7 @@ export const HomePage: React.FC<HomePageProps> = ({
                 Créez & Partagez
               </h3>
               <p className="text-xs text-slate-400 leading-relaxed">
-                Générez une salle en un clic sans inscription obligatoire. Partagez le lien direct ou le code court à vos développeurs et PO.
+                Créez une salle en 1 clic via votre compte Google, puis partagez le lien ou le code court : vos invités rejoignent instantanément sans aucune inscription.
               </p>
             </div>
 

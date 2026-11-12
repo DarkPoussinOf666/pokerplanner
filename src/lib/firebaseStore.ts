@@ -12,9 +12,11 @@ import {
   limit,
   Timestamp
 } from 'firebase/firestore';
-import fs from 'fs';
-import path from 'path';
-import { RoomState, CreatedRoomSummary } from '../types.js';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { RoomState, CreatedRoomSummary, VoteValue } from '../types.js';
+import { hashHostToken } from './firebaseAuthServer.js';
 
 // Room TTL configuration: 7 days of inactivity
 export const ROOM_TTL_DAYS = 7;
@@ -24,8 +26,37 @@ let db: ReturnType<typeof getFirestore> | null = null;
 let isQuotaExceeded = false;
 let quotaExceededLoggedTime = 0;
 
+// Ephemeral/configured server encryption key for unrevealed votes during idle eviction
+const SERVER_ENCRYPTION_KEY = crypto
+  .createHash('sha256')
+  .update(process.env.ROOM_SECRET || `scrum-poker-ephemeral-${process.pid}-${Date.now()}`)
+  .digest();
+
+function encryptVotePayload(payload: { value?: VoteValue; backValue?: VoteValue; frontValue?: VoteValue }): string {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', SERVER_ENCRYPTION_KEY, iv);
+  const encrypted = Buffer.concat([cipher.update(JSON.stringify(payload), 'utf8'), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  return `${iv.toString('base64')}.${authTag.toString('base64')}.${encrypted.toString('base64')}`;
+}
+
+function decryptVotePayload(
+  sealed: string
+): { value?: VoteValue; backValue?: VoteValue; frontValue?: VoteValue } | null {
+  try {
+    const [ivB64, tagB64, dataB64] = sealed.split('.');
+    if (!ivB64 || !tagB64 || !dataB64) return null;
+    const decipher = crypto.createDecipheriv('aes-256-gcm', SERVER_ENCRYPTION_KEY, Buffer.from(ivB64, 'base64'));
+    decipher.setAuthTag(Buffer.from(tagB64, 'base64'));
+    const decrypted = Buffer.concat([decipher.update(Buffer.from(dataB64, 'base64')), decipher.final()]);
+    return JSON.parse(decrypted.toString('utf8'));
+  } catch {
+    return null;
+  }
+}
+
 // Debounce map for saving rooms to coalesce write operations
-const pendingRoomSaves = new Map<string, { timeout: NodeJS.Timeout; room: RoomState }>();
+const pendingRoomSaves = new Map<string, { timeout: NodeJS.Timeout; room: RoomState; includeSealedVotes?: boolean }>();
 
 // In-memory short-lived cache for created rooms queries (TTL 30s) to avoid read bursts
 const userCreatedRoomsCache = new Map<string, { data: CreatedRoomSummary[]; expiresAt: number }>();
@@ -36,14 +67,17 @@ export function initFirestore() {
     const configPath = path.resolve('./firebase-applet-config.json');
     if (fs.existsSync(configPath)) {
       const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-      const app = initializeApp({
-        apiKey: config.apiKey,
-        authDomain: config.authDomain,
-        projectId: config.projectId,
-        storageBucket: config.storageBucket,
-        messagingSenderId: config.messagingSenderId,
-        appId: config.appId,
-      });
+      const app = initializeApp(
+        {
+          apiKey: config.apiKey,
+          authDomain: config.authDomain,
+          projectId: config.projectId,
+          storageBucket: config.storageBucket,
+          messagingSenderId: config.messagingSenderId,
+          appId: config.appId
+        },
+        'server-firestore-app'
+      );
       const dbId = config.firestoreDatabaseId || '(default)';
       db = getFirestore(app, dbId);
       console.log('✅ Firestore database initialized with TTL support:', dbId);
@@ -70,8 +104,8 @@ function stripUndefined<T>(obj: T): T {
       .filter(item => item !== undefined)
       .map(item => stripUndefined(item)) as unknown as T;
   }
-  const result: Record<string, any> = {};
-  for (const [key, value] of Object.entries(obj)) {
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
     if (value !== undefined) {
       result[key] = stripUndefined(value);
     }
@@ -80,152 +114,215 @@ function stripUndefined<T>(obj: T): T {
 }
 
 /**
- * Strips ephemeral and high-churn runtime data (emojis, socket IDs, offline statuses)
+ * Strips ephemeral runtime data and protects secrets (hashing hostToken, omitting/encrypting unrevealed votes)
  * before persisting to Firestore, and attaches Firestore native TTL fields (expireAt).
  */
-function sanitizeRoomForPersistence(room: RoomState): Partial<RoomState> {
+function sanitizeRoomForPersistence(room: RoomState, includeSealedVotes = false): Record<string, unknown> {
   const now = Date.now();
   const expireAtMs = now + ROOM_TTL_MS;
 
-  const cleanRoom: any = {
+  const cleanRoom: Record<string, unknown> = {
     id: room.id,
-    name: room.name || `Salle ${room.id}`,
-    hostId: room.hostId || 'anonymous',
-    hostName: room.hostName || 'Anonyme',
+    name: (room.name || `Salle ${room.id}`).slice(0, 120),
+    hostId: (room.hostId || 'anonymous').slice(0, 128),
+    hostName: (room.hostName || 'Anonyme').slice(0, 64),
     deckType: room.deckType || 'fibonacci',
-    currentStory: room.currentStory || '',
+    currentStory: (room.currentStory || '').slice(0, 300),
     estimationMode: room.estimationMode || 'GLOBAL',
     isSessionStarted: Boolean(room.isSessionStarted),
     isRevealed: Boolean(room.isRevealed),
-    timerDuration: room.timerDuration ?? null,
     history: (room.history || []).slice(0, 30),
-    backlog: room.backlog || [],
+    backlog: (room.backlog || []).slice(0, 200),
     createdTimestamp: room.createdTimestamp || now,
     lastUpdatedTimestamp: now,
-    expireAtMs: expireAtMs,
+    expireAtMs,
     // Native Firestore TTL field (Timestamp type) for automatic background purging
     expireAt: Timestamp.fromMillis(expireAtMs)
   };
 
   if (room.deckValues && Array.isArray(room.deckValues) && room.deckValues.length > 0) {
-    cleanRoom.deckValues = room.deckValues;
+    cleanRoom.deckValues = room.deckValues.slice(0, 24);
   }
   if (room.hostGoogleUid) {
     cleanRoom.hostGoogleUid = room.hostGoogleUid;
   }
-  if (room.hostToken) {
-    cleanRoom.hostToken = room.hostToken;
-  }
-  if (room.kickedUserIds && room.kickedUserIds.length > 0) {
-    cleanRoom.kickedUserIds = room.kickedUserIds;
+
+  // Never persist raw hostToken in plaintext; only persist SHA-256 hash
+  const tokenHash = room.hostTokenHash || (room.hostToken ? hashHostToken(room.hostToken) : undefined);
+  if (tokenHash) {
+    cleanRoom.hostTokenHash = tokenHash;
   }
 
-  // Sanitize participants: keep persistent profile and last voting states, drop socketIds
+  if (room.kickedUserIds && room.kickedUserIds.length > 0) {
+    cleanRoom.kickedUserIds = room.kickedUserIds.slice(0, 200);
+  }
+
   if (room.participants) {
-    cleanRoom.participants = {};
+    const cleanParticipants: Record<string, unknown> = {};
     for (const [userId, p] of Object.entries(room.participants)) {
       if (!p) continue;
-      const participantClean: any = {
+      const participantClean: Record<string, unknown> = {
         userId: p.userId || userId,
-        userName: p.userName || 'Anonyme',
+        userName: (p.userName || 'Anonyme').slice(0, 32),
         isHost: Boolean(p.isHost),
         isGoogleAuth: Boolean(p.isGoogleAuth),
         isSpectator: Boolean(p.isSpectator),
-        hasVoted: Boolean(p.hasVoted)
+        hasVoted: room.isRevealed || includeSealedVotes ? Boolean(p.hasVoted) : false
       };
       if (p.avatarUrl) participantClean.avatarUrl = p.avatarUrl;
       if (p.avatarSeed) participantClean.avatarSeed = p.avatarSeed;
       if (p.color) participantClean.color = p.color;
       if (p.icon) participantClean.icon = p.icon;
-      if (p.value !== undefined) participantClean.value = p.value;
-      if (p.backValue !== undefined) participantClean.backValue = p.backValue;
-      if (p.frontValue !== undefined) participantClean.frontValue = p.frontValue;
-      if (p.votedAt !== undefined) participantClean.votedAt = p.votedAt;
+      if (p.votedAt !== undefined && (room.isRevealed || includeSealedVotes)) {
+        participantClean.votedAt = p.votedAt;
+      }
 
-      cleanRoom.participants[userId] = participantClean;
+      if (room.isRevealed) {
+        if (p.value !== undefined) participantClean.value = p.value;
+        if (p.backValue !== undefined) participantClean.backValue = p.backValue;
+        if (p.frontValue !== undefined) participantClean.frontValue = p.frontValue;
+      } else if (includeSealedVotes && p.hasVoted) {
+        participantClean.sealedVote = encryptVotePayload({
+          value: p.value,
+          backValue: p.backValue,
+          frontValue: p.frontValue
+        });
+      }
+
+      cleanParticipants[userId] = participantClean;
     }
+    cleanRoom.participants = cleanParticipants;
   }
 
   return stripUndefined(cleanRoom);
 }
 
+async function executeRoomSave(roomData: RoomState, includeSealedVotes = false): Promise<void> {
+  const firestore = initFirestore();
+  if (!firestore || !roomData?.id) return;
+
+  try {
+    const roomRef = doc(firestore, 'rooms', roomData.id);
+    const cleanData = sanitizeRoomForPersistence(roomData, includeSealedVotes);
+
+    await setDoc(roomRef, cleanData);
+    isQuotaExceeded = false;
+  } catch (err: unknown) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    if (
+      errMsg.includes('RESOURCE_EXHAUSTED') ||
+      errMsg.includes('Quota limit exceeded') ||
+      errMsg.includes('Quota exceeded')
+    ) {
+      isQuotaExceeded = true;
+      if (Date.now() - quotaExceededLoggedTime > 5 * 60 * 1000) {
+        quotaExceededLoggedTime = Date.now();
+        console.warn(
+          'ℹ️ Firestore daily write quota limit reached. Falling back gracefully to in-memory persistence for active rooms.'
+        );
+      }
+    } else {
+      console.error(`⚠️ Error saving room ${roomData.id} to Firestore:`, err);
+    }
+  }
+}
+
 /**
  * Saves a room to Firestore with debouncing and selective persistence.
- * Ephemeral operations (such as emojis or temporary connection states) must NOT call this.
  */
-export function saveRoomToFirestore(room: RoomState, immediate: boolean = false): void {
+export function saveRoomToFirestore(
+  room: RoomState,
+  immediate: boolean = false,
+  includeSealedVotes: boolean = false
+): Promise<void> | void {
   const firestore = initFirestore();
   if (!firestore || !room?.id) return;
 
-  // Invalidate any cached summaries for this host
   if (room.hostId) userCreatedRoomsCache.delete(room.hostId);
   if (room.hostGoogleUid) userCreatedRoomsCache.delete(room.hostGoogleUid);
 
-  // If quota was exceeded in the last 15 minutes, skip write to avoid repeated failed gRPC streams
   if (isQuotaExceeded && Date.now() - quotaExceededLoggedTime < 15 * 60 * 1000) {
     return;
   }
 
-  // Clear existing pending debounce for this room
   const existing = pendingRoomSaves.get(room.id);
   if (existing) {
     clearTimeout(existing.timeout);
     pendingRoomSaves.delete(room.id);
   }
 
-  const executeSave = async (roomData: RoomState) => {
-    try {
-      const roomRef = doc(firestore, 'rooms', roomData.id);
-      const cleanData = sanitizeRoomForPersistence(roomData);
-
-      await setDoc(roomRef, cleanData, { merge: true });
-      isQuotaExceeded = false; // reset quota flag on success
-    } catch (err: any) {
-      const errMsg = err?.message || String(err);
-      if (errMsg.includes('RESOURCE_EXHAUSTED') || errMsg.includes('Quota limit exceeded') || errMsg.includes('Quota exceeded')) {
-        isQuotaExceeded = true;
-        if (Date.now() - quotaExceededLoggedTime > 5 * 60 * 1000) {
-          quotaExceededLoggedTime = Date.now();
-          console.warn('ℹ️ Firestore daily write quota limit reached. Falling back gracefully to in-memory persistence for active rooms.');
-        }
-      } else {
-        console.error(`⚠️ Error saving room ${roomData.id} to Firestore:`, err);
-      }
-    }
-  };
-
   if (immediate) {
-    executeSave(room);
+    return executeRoomSave(room, includeSealedVotes);
   } else {
-    // Debounce writes to at most once every 5 seconds per room
     const timeout = setTimeout(() => {
       pendingRoomSaves.delete(room.id);
-      executeSave(room);
+      void executeRoomSave(room, includeSealedVotes);
     }, 5000);
-    pendingRoomSaves.set(room.id, { timeout, room });
+    pendingRoomSaves.set(room.id, { timeout, room, includeSealedVotes });
   }
+}
+
+/**
+ * Flushes all debounced room saves immediately (called on SIGINT / SIGTERM).
+ */
+export async function flushPendingRoomSaves(): Promise<void> {
+  if (pendingRoomSaves.size === 0) return;
+  const tasks: Promise<void>[] = [];
+  for (const [roomId, entry] of pendingRoomSaves.entries()) {
+    clearTimeout(entry.timeout);
+    pendingRoomSaves.delete(roomId);
+    tasks.push(executeRoomSave(entry.room, true));
+  }
+  await Promise.allSettled(tasks);
 }
 
 export async function loadRoomFromFirestore(roomId: string): Promise<RoomState | null> {
   const firestore = initFirestore();
-  if (!firestore) return null;
+  if (!firestore || !roomId) return null;
 
   try {
     const roomRef = doc(firestore, 'rooms', roomId);
     const snap = await getDoc(roomRef);
     if (snap.exists()) {
-      const data = snap.data() as RoomState;
+      const rawData = snap.data() as RoomState & {
+        participants?: Record<string, RoomState['participants'][string] & { sealedVote?: string }>;
+      };
       const now = Date.now();
-      const expireAtMs = data.expireAtMs || (data.lastUpdatedTimestamp ? data.lastUpdatedTimestamp + ROOM_TTL_MS : null);
+      const expireAtMs =
+        rawData.expireAtMs || (rawData.lastUpdatedTimestamp ? rawData.lastUpdatedTimestamp + ROOM_TTL_MS : null);
       if (expireAtMs && expireAtMs < now) {
         console.log(`[Lifecycle] Room ${roomId} has expired (TTL passed). Purging from Firestore.`);
         deleteRoomFromFirestore(roomId).catch(() => {});
         return null;
       }
-      return data;
+
+      // Migrate legacy plaintext hostToken to hostTokenHash in memory and drop raw token if needed
+      if (!rawData.hostTokenHash && rawData.hostToken) {
+        rawData.hostTokenHash = hashHostToken(rawData.hostToken);
+      }
+      delete rawData.hostToken;
+
+      // Restore sealed votes if encrypted in this server lifecycle
+      if (rawData.participants) {
+        for (const p of Object.values(rawData.participants)) {
+          if (p && p.sealedVote) {
+            const unsealed = decryptVotePayload(p.sealedVote);
+            if (unsealed) {
+              if (unsealed.value !== undefined) p.value = unsealed.value;
+              if (unsealed.backValue !== undefined) p.backValue = unsealed.backValue;
+              if (unsealed.frontValue !== undefined) p.frontValue = unsealed.frontValue;
+            } else {
+              p.hasVoted = false;
+            }
+            delete p.sealedVote;
+          }
+        }
+      }
+
+      return rawData;
     }
-  } catch (err: any) {
-    const errMsg = err?.message || String(err);
+  } catch (err: unknown) {
+    const errMsg = err instanceof Error ? err.message : String(err);
     if (errMsg.includes('RESOURCE_EXHAUSTED') || errMsg.includes('Quota limit exceeded')) {
       isQuotaExceeded = true;
     } else {
@@ -239,7 +336,6 @@ export async function fetchCreatedRoomsFromFirestore(userId: string): Promise<Cr
   const firestore = initFirestore();
   if (!firestore || !userId) return [];
 
-  // Check short-term cache (30s) to avoid read spikes on repeated modal opens
   const cached = userCreatedRoomsCache.get(userId);
   if (cached && cached.expiresAt > Date.now()) {
     return cached.data;
@@ -247,14 +343,12 @@ export async function fetchCreatedRoomsFromFirestore(userId: string): Promise<Cr
 
   try {
     const roomsCol = collection(firestore, 'rooms');
-    // Fetch with limit to prevent oversized read queries
     const q1 = query(roomsCol, where('hostId', '==', userId), limit(15));
     const snap1 = await getDocs(q1);
 
     const map = new Map<string, RoomState>();
     snap1.forEach(docSnap => map.set(docSnap.id, docSnap.data() as RoomState));
 
-    // If needed and few results found, check hostGoogleUid if different
     if (map.size < 10) {
       const q2 = query(roomsCol, where('hostGoogleUid', '==', userId), limit(15));
       const snap2 = await getDocs(q2);
@@ -264,14 +358,19 @@ export async function fetchCreatedRoomsFromFirestore(userId: string): Promise<Cr
     const now = Date.now();
     const summaries: CreatedRoomSummary[] = Array.from(map.values())
       .filter(room => {
-        const expireAtMs = room.expireAtMs || (room.lastUpdatedTimestamp ? room.lastUpdatedTimestamp + ROOM_TTL_MS : null);
+        const expireAtMs =
+          room.expireAtMs || (room.lastUpdatedTimestamp ? room.lastUpdatedTimestamp + ROOM_TTL_MS : null);
         return !expireAtMs || expireAtMs > now;
       })
       .map(room => ({
         roomId: room.id,
         roomName: room.name || `Salle ${room.id}`,
         createdTimestamp: room.createdTimestamp || Date.now(),
-        expireAtMs: room.expireAtMs || (room.lastUpdatedTimestamp ? room.lastUpdatedTimestamp + ROOM_TTL_MS : (room.createdTimestamp || Date.now()) + ROOM_TTL_MS),
+        expireAtMs:
+          room.expireAtMs ||
+          (room.lastUpdatedTimestamp
+            ? room.lastUpdatedTimestamp + ROOM_TTL_MS
+            : (room.createdTimestamp || Date.now()) + ROOM_TTL_MS),
         hostId: room.hostId,
         hostName: room.hostName || 'Anonyme',
         currentStory: room.currentStory || '',
@@ -293,6 +392,12 @@ export async function deleteRoomFromFirestore(roomId: string): Promise<void> {
   const firestore = initFirestore();
   if (!firestore || !roomId) return;
 
+  const pending = pendingRoomSaves.get(roomId);
+  if (pending) {
+    clearTimeout(pending.timeout);
+    pendingRoomSaves.delete(roomId);
+  }
+
   try {
     const roomRef = doc(firestore, 'rooms', roomId);
     await deleteDoc(roomRef);
@@ -301,4 +406,3 @@ export async function deleteRoomFromFirestore(roomId: string): Promise<void> {
     console.error(`⚠️ Error deleting room ${roomId} from Firestore:`, err);
   }
 }
-
