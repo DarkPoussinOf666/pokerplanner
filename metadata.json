@@ -1,0 +1,6 @@
+{
+  "name": "Scrum Poker Express",
+  "description": "Application de Scrum Poker en temps réel avec base de données Firestore pour la persistance des salles, votes, backlog, statistiques et historiques de chiffrage.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

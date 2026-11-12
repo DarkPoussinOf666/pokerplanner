@@ -1,0 +1,41 @@
+{
+  "entities": {
+    "rooms": {
+      "title": "Room",
+      "description": "Poker room session data including participants, voting status, backlog and history",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "isProtected": { "type": "boolean" },
+        "hostId": { "type": "string" },
+        "hostToken": { "type": "string" },
+        "createdTimestamp": { "type": "number" },
+        "lastUpdatedTimestamp": { "type": "number" },
+        "expireAtMs": { "type": "number" },
+        "expireAt": { "type": "object", "description": "Firestore Timestamp used for automated native TTL policy deletion" },
+        "isRevealed": { "type": "boolean" },
+        "isSessionStarted": { "type": "boolean" },
+        "storyStartTime": { "type": "number" },
+        "currentStory": { "type": "string" },
+        "participants": { "type": "object" },
+        "backlog": { "type": "array", "items": { "type": "object" } },
+        "history": { "type": "array", "items": { "type": "object" } }
+      },
+      "required": ["id", "name", "hostId"]
+    },
+    "users": {
+      "title": "User",
+      "description": "User profile, avatar settings and created room summaries",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "avatarConfig": { "type": "object" },
+        "createdRooms": { "type": "array", "items": { "type": "object" } },
+        "lastSeen": { "type": "number" }
+      },
+      "required": ["id"]
+    }
+  }
+}
